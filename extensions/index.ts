@@ -186,6 +186,12 @@ function makeRefreshModels(rt: ProviderRuntime, cache: CacheFile): (context: Ref
 			return models;
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
+			// Caller-aborted refresh (e.g. list mode, /model closed mid-flight):
+			// not a provider failure — rethrow without cache fallback or warnings.
+			if (context?.signal?.aborted) {
+				rt.lastResult = { ok: false, at: new Date().toISOString(), detail: `aborted: ${message}` };
+				throw err;
+			}
 			rt.lastResult = { ok: false, at: new Date().toISOString(), detail: message };
 			if (err instanceof FilterEmptyError) throw err;
 			// Network/HTTP/JSON failure: serve the persisted last-good list,
