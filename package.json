@@ -1,0 +1,39 @@
+{
+  "name": "pi-live-models",
+  "version": "0.1.0",
+  "description": "Live /v1/models discovery for pi — any OpenAI-compatible or Anthropic gateway, plus built-in provider catalog overrides. Config-driven filters, metadata merge ladder, credential reuse, offline cache.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "models",
+    "model-discovery",
+    "openai-compatible",
+    "anthropic",
+    "openrouter"
+  ],
+  "license": "MIT",
+  "author": "wait4xx",
+  "files": [
+    "extensions",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "smoke": "tsx scripts/smoke.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  }
+}
