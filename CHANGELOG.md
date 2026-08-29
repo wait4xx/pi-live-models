@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.2] - 2026-08-29
+
+Second catalog source (Models.dev) + tolerance-based merging.
+
+### Added
+
+- **Models.dev as a second, independent catalog source** (~7300 entries from 200+ providers, indexed from official documentation with fast coverage of new releases — observed: a model indexed 3 days after launch). Each source has its own fetch path, disk cache (`live-models-catalog-modelsdev.json`), 7-day staleness clock and failure backoff; one source being down never affects the other. `/live-models-catalog` shows both sources; `/live-models-catalog-refresh` refetches both (partial failure still applies the successful one). Real-data effect: normalized coverage grew from ~3000 to ~10300 matchable keys.
+
+### Changed
+
+- **Tolerance-based merging**: vendor candidates and the no-vendor consensus tier now compare values per field within a 5% relative tolerance — rounding differences between catalogs (litellm's decimal `200000/128000` vs models.dev's binary-exact `204800/131072`) are not disagreements — and merge to the conservative minimum (a too-small cap merely limits output; a too-large one hard-fails gateways). Real-data effect: `glm-5.1` and `glm-4.7-flash` went from divergent to matched.
+- **Models.dev entries never claim vendor status**: its 200+ namespaces include many resellers listing the same bare ids as the vendor's own namespace (`vancine/glm-5.3-flash` vs `zai/glm-5.3-flash`) and nothing in the data distinguishes vendor from reseller. Models.dev contributes consensus/divergence signals and new-model coverage, never unvetted authority — `glm-5.3-flash` therefore surfaces an honest divergence warning (showing the official-shape value) instead of silently trusting any single platform limit.
+- README: dual-source documentation + an Acknowledgments section crediting both catalog projects.
+
 ## [0.3.1] - 2026-08-29
 
 Catalog arbitration: vendor truth first, consensus second, disagreement warns.

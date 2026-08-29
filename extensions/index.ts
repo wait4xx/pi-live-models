@@ -40,6 +40,7 @@ import {
 	catalogPath,
 	configPath,
 	loadConfigFile,
+	modelsDevCatalogPath,
 	type LiveModelsConfig,
 	type ProviderEntry,
 } from "./config.ts";
@@ -53,9 +54,11 @@ import {
 	buildCatalogIndex,
 	createCatalogManager,
 	ensureCatalogSoft,
+	mergeCatalogSources,
 	readCatalogCache,
 	refreshCatalogNow,
 	saneWindow,
+	type CatalogData,
 	type CatalogManager,
 } from "./catalog.ts";
 import { buildCatalog, buildModelsUrl, collectStaticById, resolveApiKey, type ModelDef, type RefreshContext } from "./discover.ts";
@@ -184,8 +187,8 @@ async function discoverOnce(
 	const staticById = collectStaticById(rt.id);
 	// Public catalog enrichment: soft-ensure (disk load + background refresh,
 	// never blocking on the network), then exact-normalized lookup per model.
-	const catalogData = rt.entry.catalog !== false ? ensureCatalogSoft(state.cat) : null;
-	const catalogIndex = catalogData ? buildCatalogIndex(catalogData.models) : undefined;
+	const catalogView = rt.entry.catalog !== false ? ensureCatalogSoft(state.cat) : null;
+	const catalogIndex = catalogView ? buildCatalogIndex(catalogView.data.models, catalogView.extraEntries) : undefined;
 	const { liveModels, outcomes, staticModels, warnings } = buildCatalog(items, {
 		entry: rt.entry,
 		filters: rt.filters,
@@ -244,7 +247,14 @@ function makeRefreshModels(rt: ProviderRuntime, state: ExtensionState): (context
 			if (cached?.raw?.length) {
 				// v2 cache: rebuild through the full pipeline (field filters,
 				// merge ladder, union) from the raw items.
-				const { liveModels, staticModels } = buildCatalog(cached.raw, { entry: rt.entry, filters: rt.filters, staticById: collectStaticById(rt.id), providerId: rt.id, catalog: rt.entry.catalog !== false && state.cat.data ? buildCatalogIndex(state.cat.data.models) : undefined });
+				const cachedView = rt.entry.catalog !== false ? ensureCatalogSoft(state.cat) : null;
+				const { liveModels, staticModels } = buildCatalog(cached.raw, {
+					entry: rt.entry,
+					filters: rt.filters,
+					staticById: collectStaticById(rt.id),
+					providerId: rt.id,
+					catalog: cachedView ? buildCatalogIndex(cachedView.data.models, cachedView.extraEntries) : undefined,
+				});
 				if (liveModels.length) {
 					const models = [...liveModels, ...staticModels];
 					rt.lastModels = models;
@@ -444,21 +454,24 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("live-models-catalog", {
 		description: "Show public metadata catalog status (source, cache age, entries)",
 		handler: (_args, ctx) => {
-			const data = state.cat.data ?? readCatalogCache();
-			if (!data) {
+			const main = state.cat.data ?? readCatalogCache(catalogPath());
+			const dev = state.cat.devData ?? readCatalogCache(modelsDevCatalogPath());
+			if (!main && !dev) {
 				ctx.ui.notify(`${LOG} catalog: not loaded yet — fetched in the background on first discovery.\nRun /live-models-catalog-refresh to fetch it now.`);
 				return;
 			}
-			const ageH = Math.round((Date.now() - data.fetchedAt) / 3_600_000);
-			const idx = buildCatalogIndex(data.models);
+			const view = mergeCatalogSources(main, dev)!;
+			const idx = buildCatalogIndex(view.data.models, view.extraEntries);
+			const src = (label: string, d: CatalogData | null): string =>
+				d ? `  ${label}: ${Object.keys(d.models).length} models, fetched ${new Date(d.fetchedAt).toISOString()}` : `  ${label}: (missing)`;
 			ctx.ui.notify(
 				[
 					`${LOG} catalog`,
-					`  source: ${data.url}`,
-					`  fetched: ${new Date(data.fetchedAt).toISOString()} (${ageH < 1 ? "<1h" : `${ageH}h`} ago)`,
-					`  entries: ${Object.keys(data.models).length} models`,
-				`  arbitration: ${idx.byKey.size} matchable / ${idx.divergent.size} divergent (skipped+warned) / ${idx.unverified.size} unverified (lone third-party, silent)`,
-					`  cache: ${catalogPath()}`,
+					src("litellm", main),
+					src("models.dev", dev),
+					`  merged entries: ${Object.keys(view.data.models).length} models`,
+					`  arbitration: ${idx.byKey.size} matchable / ${idx.divergent.size} divergent (skipped+warned) / ${idx.unverified.size} unverified (lone third-party, silent)`,
+					`  cache: ${catalogPath()} + ${modelsDevCatalogPath()}`,
 					`  refreshed in the background every ${Math.round(CATALOG_TTL_MS / 86_400_000)}d`,
 				].join("\n"),
 			);
@@ -468,10 +481,21 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("live-models-catalog-refresh", {
 		description: "Force a refetch of the public metadata catalog",
 		handler: async (_args, ctx) => {
-			ctx.ui.notify(`${LOG} refreshing catalog ...`);
+			ctx.ui.notify(`${LOG} refreshing catalog (litellm + models.dev) ...`);
+			const startedAt = Date.now();
 			try {
-				const data = await refreshCatalogNow(state.cat);
-				ctx.ui.notify(`${LOG} catalog refreshed\n  source: ${data.url}\n  entries: ${Object.keys(data.models).length} models\n  cache: ${catalogPath()}`);
+				const view = await refreshCatalogNow(state.cat);
+				const line = (label: string, d: CatalogData | null): string =>
+					d ? `  ${label}: ${Object.keys(d.models).length} models${d.fetchedAt < startedAt ? " (stale — refresh failed, kept previous)" : ""}` : `  ${label}: FAILED`;
+				ctx.ui.notify(
+					[
+						`${LOG} catalog refreshed`,
+						line("litellm", state.cat.data),
+						line("models.dev", state.cat.devData),
+						`  merged entries: ${Object.keys(view.data.models).length} models`,
+						`  cache: ${catalogPath()} + ${modelsDevCatalogPath()}`,
+					].join("\n"),
+				);
 			} catch (err) {
 				ctx.ui.notify(`${LOG} catalog refresh failed: ${err instanceof Error ? err.message : err}`);
 			}

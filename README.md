@@ -50,7 +50,7 @@ One config file, zero code, zero runtime dependencies.
 - 🔍 **Filter observability** — `/live-models` shows `raw -> kept` statistics; `/live-models-test <provider>` dry-runs discovery and annotates **every** model with its keep/drop reason; `/live-models-refresh [ids...]` forces an immediate refresh bypassing `refreshIntervalMs`.
 - 🔑 **Credential reuse** — discovery reuses the key you already have: `/login` stored credential → entry `apiKey` (`$ENV` / `${ENV}` / `!command` / literal) → `models.json` → `<PROVIDER>_API_KEY` env. Keys never appear in logs or errors.
 - 🪜 **Metadata merge ladder** — `defaults` < static definitions (`models.json` + `models-store.json`, by id) < live endpoint hints (`context_length`, `max_completion_tokens`, OpenRouter `top_provider.*` and `pricing.*` cost) < **public catalog** (LiteLLM data, exact match only) < `overrides[id]`. New models get sane fallbacks instead of blank metadata. `mergeStatic: "union"` can additionally register static-only models the gateway forgot to list.
-- 🌐 **Public metadata catalog** — relays often misreport metadata (`context_length: 128000` stamped on every model). A community catalog (LiteLLM's `model_prices_and_context_window.json`) cross-checks the gateway: exact-name matches correct `contextWindow`/`maxTokens`, implausible live values are rejected by sanity windows, and suspicious patterns (≥4× divergence from the catalog, uniform placeholder values) are surfaced with a ready-made `/live-models-fix` hint. Cache-backed, background-refreshed, one flag to disable per provider.
+- 🌐 **Public metadata catalog** — relays often misreport metadata (`context_length: 128000` stamped on every model). Two community catalogs (LiteLLM + Models.dev) cross-check the gateway: exact-name matches correct `contextWindow`/`maxTokens`, implausible live values are rejected by sanity windows, and suspicious patterns (≥4× divergence from the catalog, uniform placeholder values) are surfaced with a ready-made `/live-models-fix` hint. Cache-backed, background-refreshed, one flag to disable per provider.
 - 🛡️ **Never empties your catalog** — a refresh that yields 0 usable models throws and pi keeps the previous list; network failures fall back to a persisted last-good cache (raw items re-filtered and re-merged with your *current* rules), so a gateway outage never blanks `/model` after a restart.
 - 📦 Zero runtime dependencies · TypeScript · unit-tested · CI on Windows + Ubuntu.
 
@@ -173,14 +173,14 @@ Presets cannot reference other presets; unknown preset names are warned + ignore
 
 ### Public metadata catalog
 
-Many relay gateways stamp every model with the same `context_length` (usually `128000`), or omit metadata entirely. The public catalog is an independent cross-check, built from **LiteLLM's** community-maintained [`model_prices_and_context_window.json`](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) (~2500 chat models).
+Many relay gateways stamp every model with the same `context_length` (usually `128000`), or omit metadata entirely. The public catalog is an independent cross-check built from **two community-maintained sources**: LiteLLM's [`model_prices_and_context_window.json`](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) (~2500 chat models) and [Models.dev](https://models.dev)'s [`api.json`](https://models.dev/api.json) (~7300 entries from 200+ providers, indexed from official documentation — fast coverage of new releases).
 
 **How it works**
 
-- **Sources**: jsDelivr CDN first, raw.githubusercontent.com fallback — fetched in the background, never blocking discovery. On failure, discovery proceeds without the catalog and retries after a 30-minute backoff.
-- **Cache**: `~/.pi/agent/live-models-catalog.json`, refreshed in the background after 7 days. `/live-models-catalog-refresh` forces a refetch.
+- **Sources**: two independent catalogs, each with its own fetch path, disk cache, staleness clock and failure backoff — one source being down never affects the other. LiteLLM is fetched via jsDelivr CDN with a raw.githubusercontent.com fallback; Models.dev is a single CDN URL. Both are fetched in the background, never blocking discovery. On failure, discovery proceeds without the catalogs and retries after a 30-minute backoff.
+- **Cache**: `~/.pi/agent/live-models-catalog.json` (LiteLLM) and `~/.pi/agent/live-models-catalog-modelsdev.json` (Models.dev), each refreshed in the background after 7 days. `/live-models-catalog-refresh` forces a refetch of both (a partial failure still applies the successful one).
 - **Matching**: exact model-name match only — no fuzzy matching, ever. `provider/` prefixes, `:suffix` tags (`:free`, `:latest`) and date suffixes (`gpt-4o-2024-11-20`) are normalized for the lookup; an exact catalog entry always beats a normalized one.
-- **Arbitration** (normalized keys only): the same model deployed by several providers routinely carries *deployment-specific* limits, so candidates are arbitrated in tiers — the **vendor's own entry wins** (a two-segment `vendor/model` key whose `litellm_provider` matches, e.g. `zai/glm-4.6`); with no vendor entry, **independent sources must agree** (consensus); **disagreement abstains** — the model falls back to the static/live ladder and a warning shows the competing values with a `/live-models-fix` hint. A **lone third-party deployment with no vendor entry** is silently skipped (nothing to cross-check; observed in the wild: a hosted deployment stamping its own platform limit — 1048575 — where the vendor says 131072). `/live-models-catalog` shows the arbitration totals.
+- **Arbitration** (normalized keys only): the same model deployed by several providers routinely carries *deployment-specific* limits, so candidates are arbitrated in tiers — the **vendor's own LiteLLM entry wins** (a two-segment `vendor/model` key whose `litellm_provider` matches, e.g. `zai/glm-4.6`); multiple vendor entries must agree within a 5% tolerance (rounding differences between catalogs are not disagreements — the merged value is the conservative minimum); with no vendor entry, **independent sources must agree** within the same tolerance; **disagreement abstains** — the model falls back to the static/live ladder and a warning shows the top competing values with a `/live-models-fix` hint. A **lone third-party deployment** is silently skipped as unverified. Models.dev entries never claim vendor status: its 200+ namespaces include many resellers listing the same bare ids as the vendor's own (`vancine/glm-5.3-flash` vs `zai/glm-5.3-flash`) and nothing in the data distinguishes them — so Models.dev contributes consensus/divergence signals and new-model coverage, never unvetted authority. `/live-models-catalog` shows both sources and the arbitration totals.
 - **Scope**: chat-mode entries (entries without a `mode` field are kept); values must pass sanity windows (context 1,024–10,000,000 tokens, max output 128–10,000,000).
 
 **What it changes**
@@ -221,7 +221,7 @@ Live-only models fall back to `defaults`, then to pi-safe values (`reasoning: tr
 | `/live-models-reload` | Re-read the config file and re-register immediately (no restart). |
 | `/live-models-test <provider>` | Dry-run one discovery: per-model `kept by …` / `dropped by …` annotation plus a metadata preview (context window, cost, input types). |
 | `/live-models-refresh [ids...]` | Force an immediate live refresh, bypassing `refreshIntervalMs` (no argument = all providers). Updates the in-memory catalog and the persisted cache; failures are shown verbatim (no cache fallback for manual actions). |
-| `/live-models-catalog` | Show public-catalog status: source URL, cache age, entry count, cache path. |
+| `/live-models-catalog` | Show public-catalog status: both sources (entries, fetch time), merged count, arbitration totals, cache paths. |
 | `/live-models-catalog-refresh` | Force a blocking refetch of the public metadata catalog. |
 | `/live-models-fix <provider> <model> ctx=<n> [max=<n>]` | Write a metadata correction into `overrides` in `live-models.json` (atomically, preserving the rest of the file), then run `/live-models-reload` to apply. Validates against the sanity windows and the provider's known model ids. |
 
@@ -304,17 +304,26 @@ Live-only models fall back to `defaults`, then to pi-safe values (`reasoning: tr
 
 ## Safety notes
 
-- The extension performs `GET` requests only against URLs **you** configure, plus the single optional public-catalog read (jsDelivr/raw.githubusercontent, no query parameters, no credentials); no bundled endpoints, no telemetry.
+- The extension performs `GET` requests only against URLs **you** configure, plus the two optional public-catalog reads (LiteLLM via jsDelivr/raw.githubusercontent, Models.dev — no query parameters, no credentials); no bundled endpoints, no telemetry.
 - The cache files store model metadata only — never credentials.
 - Catalog data is community-maintained and matched exactly; it can be wrong or missing, and overrides always take precedence.
 - Invalid config fields degrade gracefully (warned and ignored); config typos never crash pi startup.
+
+## Acknowledgments
+
+Model metadata comes from community-maintained catalogs — this project would be much poorer without them:
+
+- **[LiteLLM](https://github.com/BerriAI/litellm)** — the [`model_prices_and_context_window.json`](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) catalog: the broadest provider/pricing/metadata dataset in the ecosystem, and the source of the vendor-namespace truth this extension arbitrates on.
+- **[Models.dev](https://models.dev)** — the [`api.json`](https://models.dev/api.json) catalog: structured per-provider model specs indexed from official documentation, with remarkably fast coverage of new releases.
+
+Thank you to both teams and their contributors. This extension is an independent consumer and is not affiliated with either project.
 
 ## Development
 
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # node:test via tsx (70 tests)
+npm test            # node:test via tsx (77 tests)
 npm run smoke       # register against the real config (no TUI)
 npx tsx scripts/smoke.ts GLM   # + one live refreshModels pass for GLM
 ```

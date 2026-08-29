@@ -23,7 +23,7 @@ import {
 	saneWindow,
 	writeCatalogCache,
 } from "../extensions/catalog.ts";
-import { applyFixToRawConfig, parseConfig, type ProviderEntry } from "../extensions/config.ts";
+import { applyFixToRawConfig, catalogPath, modelsDevCatalogPath, parseConfig, type ProviderEntry } from "../extensions/config.ts";
 import { buildCatalog, buildModel } from "../extensions/discover.ts";
 import { compileFilters } from "../extensions/filters.ts";
 import fs from "node:fs";
@@ -303,13 +303,15 @@ test("ensureCatalogSoft: serves fresh disk cache with ZERO network activity", as
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "plm-catalog-"));
 	try {
 		process.env.PI_CODING_AGENT_DIR = dir;
-		writeCatalogCache({ url: "https://src", fetchedAt: Date.now(), models: { "gpt-4o": { contextWindow: 128000 } } });
+		writeCatalogCache({ url: "https://src", fetchedAt: Date.now(), models: { "gpt-4o": { contextWindow: 128000 } } }, catalogPath());
+		writeCatalogCache({ url: "https://dev", fetchedAt: Date.now(), models: {} }, modelsDevCatalogPath());
 		// Any network attempt surfaces as a failed refresh, failing the assertions below.
 		(globalThis as any).fetch = () => Promise.reject(new Error("network must not be touched"));
 		const mgr = createCatalogManager();
-		const data = ensureCatalogSoft(mgr);
-		assert.equal(data?.models["gpt-4o"]?.contextWindow, 128000);
+		const view = ensureCatalogSoft(mgr);
+		assert.equal(view?.data.models["gpt-4o"]?.contextWindow, 128000);
 		assert.equal(mgr.inflight, null); // fresh cache -> no background fetch kicked
+		assert.equal(mgr.devInflight, null);
 		assert.equal(mgr.lastFailureAt, null);
 	} finally {
 		globalThis.fetch = savedFetch;
@@ -326,15 +328,23 @@ test("ensureCatalogSoft: stale cache triggers a background refresh that updates 
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "plm-catalog-"));
 	try {
 		process.env.PI_CODING_AGENT_DIR = dir;
-		writeCatalogCache({ url: "https://old", fetchedAt: Date.now() - CATALOG_TTL_MS - 1_000, models: {} });
-		// Stub the network: both sources respond with a tiny valid catalog.
-		(globalThis as any).fetch = () =>
-			Promise.resolve(new Response(JSON.stringify({ "gpt-5": { max_input_tokens: 400000, max_output_tokens: 32768, mode: "chat" } }), { status: 200 }));
+		writeCatalogCache({ url: "https://old", fetchedAt: Date.now() - CATALOG_TTL_MS - 1_000, models: {} }, catalogPath());
+		writeCatalogCache({ url: "https://olddev", fetchedAt: Date.now() - CATALOG_TTL_MS - 1_000, models: {} }, modelsDevCatalogPath());
+		// Stub the network per source: litellm shape vs models.dev shape.
+		(globalThis as any).fetch = (url: unknown) => {
+			const body =
+				String(url).includes("models.dev")
+					? JSON.stringify({ zai: { models: { "glm-5.3-flash": { limit: { context: 1000000, output: 131072 } } } } })
+					: JSON.stringify({ "gpt-5": { max_input_tokens: 400000, max_output_tokens: 32768, mode: "chat" } });
+			return Promise.resolve(new Response(body, { status: 200 }));
+		};
 		const mgr = createCatalogManager();
-		ensureCatalogSoft(mgr); // stale -> background kick, returns stale data immediately
-		assert.ok(mgr.inflight, "expected a background refresh to start");
-		await mgr.inflight;
+		ensureCatalogSoft(mgr); // stale -> background kick, returns stale view immediately
+		assert.ok(mgr.inflight, "expected a litellm background refresh to start");
+		assert.ok(mgr.devInflight, "expected a models.dev background refresh to start");
+		await Promise.all([mgr.inflight, mgr.devInflight]);
 		assert.equal(mgr.data?.models["gpt-5"]?.contextWindow, 400000);
+		assert.equal(mgr.devData?.models["zai/glm-5.3-flash"]?.maxTokens, 131072);
 	} finally {
 		globalThis.fetch = savedFetch;
 		if (savedDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -350,14 +360,14 @@ test("catalog disk cache round-trip in an isolated agent dir; malformed -> null"
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "plm-catalog-"));
 	try {
 		process.env.PI_CODING_AGENT_DIR = dir;
-		assert.equal(readCatalogCache(), null); // missing
-		writeCatalogCache({ url: "https://src", fetchedAt: 1234, models: { "gpt-4o": { contextWindow: 128000 } } });
-		const data = readCatalogCache();
+		assert.equal(readCatalogCache(catalogPath()), null); // missing
+		writeCatalogCache({ url: "https://src", fetchedAt: 1234, models: { "gpt-4o": { contextWindow: 128000 } } }, catalogPath());
+		const data = readCatalogCache(catalogPath());
 		assert.equal(data?.url, "https://src");
 		assert.equal(data?.fetchedAt, 1234);
 		assert.equal(data?.models["gpt-4o"]?.contextWindow, 128000);
 		fs.writeFileSync(path.join(dir, "live-models-catalog.json"), "{broken", "utf8");
-		assert.equal(readCatalogCache(), null); // malformed
+		assert.equal(readCatalogCache(catalogPath()), null); // malformed
 	} finally {
 		if (saved === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = saved;

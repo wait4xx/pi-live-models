@@ -75,7 +75,7 @@ export interface ProviderEntry {
 	overrides?: Record<string, ModelOverride>;
 	/** Live pricing fill strategy. Default "fill-zero": use live pricing only when no other source (override/static/defaults) defines cost. */
 	costFromLive?: CostFromLive;
-	/** Enrich metadata from the public catalog (LiteLLM community data) for well-known models. Default true. */
+	/** Enrich metadata from the public catalogs (LiteLLM + Models.dev community data) for well-known models. Default true. */
 	catalog?: boolean;
 	/** "live" (default): only live-listed models, static defs only enrich metadata. "union": also register static-only models. */
 	mergeStatic?: MergeStatic;
@@ -109,6 +109,10 @@ export function cachePath(): string {
 
 export function catalogPath(): string {
 	return path.join(agentDir(), "live-models-catalog.json");
+}
+
+export function modelsDevCatalogPath(): string {
+	return path.join(agentDir(), "live-models-catalog-modelsdev.json");
 }
 
 export function modelsJsonPath(): string {

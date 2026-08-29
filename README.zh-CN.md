@@ -31,7 +31,7 @@
 - 🔍 **过滤可观测**——`/live-models` 显示 `raw -> kept` 统计；`/live-models-test <provider>` 干跑并**逐模型**标注保留/丢弃原因；`/live-models-refresh [ids...]` 绕过节流强制立即刷新。
 - 🔑 **凭据复用**——刷新复用你已有的密钥：`/login` 存储凭据 → 条目 `apiKey`（`$ENV` / `${ENV}` / `!命令` / 明文）→ `models.json` → `<PROVIDER>_API_KEY` 环境变量，四级链式解析。密钥永不落日志、永不落缓存。
 - 🪜 **元数据合并阶梯**——`defaults` < 静态定义（`models.json` + `models-store.json`，按 id 匹配）< 端点提示（`context_length`、`max_completion_tokens`、OpenRouter `top_provider.*` 与 `pricing.*` 价格）< **公共目录**（LiteLLM 社区数据，仅精确匹配）< `overrides[id]`。新模型也有合理兜底值而非空白元数据。`mergeStatic: "union"` 还能把网关列表里缺失的静态模型补注册进来。
-- 🌐 **公共元数据目录**——中转站常常乱报元数据（所有模型都盖一个 `context_length: 128000`）。社区目录（LiteLLM 的 `model_prices_and_context_window.json`）交叉校验网关：精确同名匹配纠正 `contextWindow`/`maxTokens`，离谱的 live 值被合理性窗口拦截，可疑模式（与目录相差 ≥4×、多模型同一占位值）主动告警并给出 `/live-models-fix` 现成命令。缓存支撑、后台刷新、一个字段即可按 provider 关闭。
+- 🌐 **公共元数据目录**——中转站常常乱报元数据（所有模型都盖一个 `context_length: 128000`）。双社区目录（LiteLLM + Models.dev）交叉校验网关：精确同名匹配纠正 `contextWindow`/`maxTokens`，离谱的 live 值被合理性窗口拦截，可疑模式（与目录相差 ≥4×、多模型同一占位值）主动告警并给出 `/live-models-fix` 现成命令。缓存支撑、后台刷新、一个字段即可按 provider 关闭。
 - 🛡️ **永不清空目录**——过滤后 0 模型即报错，pi 保留上一份列表；网络故障回落磁盘缓存（按**当前**规则完整重建），网关挂掉重启也不会空白 `/model`。
 - 📦 零运行时依赖 · TypeScript · 单元测试 · Windows + Ubuntu 双平台 CI。
 
@@ -154,14 +154,14 @@ pi install git:github.com/wait4xx/pi-live-models
 
 ### 公共元数据目录
 
-大量中转网关给所有模型盖上同一个 `context_length`（通常是 `128000`），或干脆不报元数据。公共目录是独立的交叉校验源，数据来自 **LiteLLM** 社区维护的 [`model_prices_and_context_window.json`](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)（约 2500 个 chat 模型）。
+大量中转网关给所有模型盖上同一个 `context_length`（通常是 `128000`），或干脆不报元数据。公共目录是独立的交叉校验源，由**两个社区维护的数据源**构成：LiteLLM 的 [`model_prices_and_context_window.json`](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)（约 2500 个 chat 模型）与 [Models.dev](https://models.dev) 的 [`api.json`](https://models.dev/api.json)（约 7300 条、200+ 家 provider，从官方文档索引——新模型收录极快）。
 
 **怎么运作**
 
-- **数据源**：先 jsDelivr CDN，再 raw.githubusercontent.com 兜底——后台拉取，绝不阻塞发现流程。失败时发现照常进行（无目录参与），30 分钟退避后自动重试。
-- **缓存**：`~/.pi/agent/live-models-catalog.json`，7 天后台刷新。`/live-models-catalog-refresh` 可强制重拉。
+- **数据源**：两个相互独立的目录，各自拥有独立的拉取链路、磁盘缓存、过期时钟与失败退避——一个源挂了不影响另一个。LiteLLM 走 jsDelivr CDN、raw.githubusercontent.com 兜底；Models.dev 为单一 CDN URL。均为后台拉取，绝不阻塞发现流程。失败时发现照常进行（无目录参与），30 分钟退避后自动重试。
+- **缓存**：`~/.pi/agent/live-models-catalog.json`（LiteLLM）与 `~/.pi/agent/live-models-catalog-modelsdev.json`（Models.dev），各自 7 天后台刷新。`/live-models-catalog-refresh` 强制重拉两个源（部分失败时成功的源照常生效）。
 - **匹配**：仅精确同名匹配——永不做模糊匹配。`provider/` 前缀、`:suffix` 标签（`:free`、`:latest`）、日期后缀（`gpt-4o-2024-11-20`）在查询时归一化；目录里的精确键永远优先于归一化键。
-- **仲裁**（仅归一化键）：同一模型被多家部署时常携带各自平台的上限值，候选按层级仲裁——**厂商官方条目优先**（两段式 `厂商/模型` 键且 `litellm_provider` 与前缀一致，如 `zai/glm-4.6`）；无官方时**独立来源必须一致**（共识）；**不一致则弃用并告警**——模型落回静态/live 阶梯，告警列出各方数值并附 `/live-models-fix` 现成命令。**仅剩单一第三方部署且无官方条目**时静默跳过（无从核对；真实案例：某托管部署自报平台上限 1048575，厂商实际为 131072）。`/live-models-catalog` 显示仲裁统计。
+- **仲裁**（仅归一化键）：同一模型被多家部署时常携带各自平台的上限值，候选按层级仲裁——**厂商在 LiteLLM 的官方条目优先**（两段式 `厂商/模型` 键且 `litellm_provider` 与前缀一致，如 `zai/glm-4.6`）；多个官方条目须在 5% 容差内一致（目录间的舍入口径差异不算分歧——合并取保守最小值）；无官方时**独立来源须在同等容差内一致**；**不一致则弃用并告警**——模型落回静态/live 阶梯，告警列出主要候选值并附 `/live-models-fix` 现成命令。**仅剩单一第三方部署**时静默跳过为 unverified。Models.dev 条目永不冒认官方：其 200+ 命名空间含大 resellers，它们用与厂商相同的裸 id 上架（`vancine/glm-5.3-flash` 与 `zai/glm-5.3-flash` 键形完全相同），数据里无法区分——因此 Models.dev 只贡献共识/分歧信号与新模型覆盖，不带未经审计的权威。`/live-models-catalog` 显示双源状态与仲裁统计。
 - **范围**：chat 类条目（无 `mode` 字段的条目保留）；数值须过合理性窗口（上下文 1,024–10,000,000 tokens，最大输出 128–10,000,000）。
 
 **改变什么**
@@ -202,7 +202,7 @@ live 值必须先过合理性窗口才能赢得所在层：上下文整数 1,024
 | `/live-models-reload` | 立即重读配置并重新注册（无需重启）。 |
 | `/live-models-test <provider>` | 干跑一次发现：逐模型 `kept by …` / `dropped by …` 标注 + 元数据预览（上下文窗口、价格、输入类型）。 |
 | `/live-models-refresh [ids...]` | 绕过 `refreshIntervalMs` 强制立即刷新（无参数 = 全部 provider）。更新内存目录与持久缓存；失败原样展示（手动动作不走缓存回落）。 |
-| `/live-models-catalog` | 查看公共目录状态：数据源 URL、缓存龄期、条目数、缓存路径。 |
+| `/live-models-catalog` | 查看公共目录状态：双源条目数与拉取时间、合并数、仲裁统计、缓存路径。 |
 | `/live-models-catalog-refresh` | 强制阻塞式重拉公共元数据目录。 |
 | `/live-models-fix <provider> <model> ctx=<n> [max=<n>]` | 把元数据修正写进 `live-models.json` 的 `overrides`（原子写入，保留文件其余部分），然后 `/live-models-reload` 生效。写入前校验合理性窗口与该 provider 的已知模型 id。 |
 
@@ -285,17 +285,26 @@ live 值必须先过合理性窗口才能赢得所在层：上下文整数 1,024
 
 ## 安全说明
 
-- 扩展只对你**自己配置**的 URL 发 `GET` 请求，外加一次可选的公共目录读取（jsDelivr/raw.githubusercontent，无查询参数、无凭据）；不内置任何端点，无遥测。
+- 扩展只对你**自己配置**的 URL 发 `GET` 请求，外加两次可选的公共目录读取（LiteLLM 走 jsDelivr/raw.githubusercontent、Models.dev——无查询参数、无凭据）；不内置任何端点，无遥测。
 - 缓存文件只存模型元数据——绝不存凭据。
 - 公共目录数据由社区维护、仅精确匹配，可能有误或有缺失；overrides 永远优先。
 - 非法配置字段优雅降级（警告 + 忽略）；配置手误永远不会弄崩 pi 启动。
+
+## 致谢
+
+模型元数据来自社区维护的公共目录——没有它们就没有本扩展的这些能力：
+
+- **[LiteLLM](https://github.com/BerriAI/litellm)**——[`model_prices_and_context_window.json`](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) 目录：生态里覆盖最广的 provider/价格/元数据集，也是本扩展官方仲裁所依赖的厂商命名空间事实源。
+- **[Models.dev](https://models.dev)**——[`api.json`](https://models.dev/api.json) 目录：从官方文档索引的结构化逐厂商模型规格，新模型收录速度极快。
+
+感谢两个团队与全体贡献者。本扩展是独立消费者，与上述项目无隶属关系。
 
 ## 开发
 
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # node:test via tsx（70 个用例）
+npm test            # node:test via tsx（77 个用例）
 npm run smoke       # 对真实配置注册（不进 TUI）
 npx tsx scripts/smoke.ts GLM   # + GLM 真实刷新一轮
 ```

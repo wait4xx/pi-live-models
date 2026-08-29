@@ -3,8 +3,8 @@
  *
  * Gateway-reported context lengths are frequently wrong — relay/aggregator
  * services often stamp every model with the same placeholder value. This
- * module layers a community-maintained catalog (LiteLLM's
- * model_prices_and_context_window.json, 3.3k+ models) into the metadata
+ * module layers two community-maintained catalogs (LiteLLM's
+ * model_prices_and_context_window.json and models.dev's api.json) into the metadata
  * merge ladder as a value ABOVE live hints and BELOW explicit overrides:
  *
  *   defaults < static < live < catalog < overrides[id]
@@ -16,7 +16,7 @@
  * this is best-effort enrichment and must never break a refresh.
  */
 import fs from "node:fs";
-import { catalogPath } from "./config.ts";
+import { catalogPath, modelsDevCatalogPath } from "./config.ts";
 
 const LOG = "[pi-live-models]";
 
@@ -34,6 +34,21 @@ const SOURCE_URLS = [
 	"https://cdn.jsdelivr.net/gh/BerriAI/litellm@main/model_prices_and_context_window.json",
 	"https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
 ];
+
+/** Second, independent catalog source: models.dev aggregates per-vendor
+ *  model specs from official documentation — fast coverage of new releases
+ *  (observed: a model indexed 3 days after launch) with limit.context /
+ *  limit.output fields. Entries are keyed "<provider-slug>/<id>" so the
+ *  existing normalization + vendor arbitration apply unchanged. */
+const MODELSDEV_URL = "https://models.dev/api.json";
+
+/** Vendor entries from independent catalogs may quote the same official
+ *  limit in different roundings (litellm: 200000/128000 decimal approx vs
+ *  models.dev: 204800/131072 binary-exact — 2.4% apart, same spec). Vendor
+ *  candidates within this relative tolerance count as agreeing; the merged
+ *  value is the CONSERVATIVE minimum (a too-small max_tokens merely caps
+ *  output, a too-large one hard-fails the gateway). */
+export const VENDOR_TOLERANCE = 0.05;
 
 /** Sanity bounds for context windows / output limits (tokens). */
 export const CONTEXT_WINDOW_MIN = 1024;
@@ -73,16 +88,27 @@ export interface CatalogManager {
 	inflight: Promise<void> | null;
 	/** Epoch ms of the last failed refresh — backoff marker. */
 	lastFailureAt: number | null;
+	/** Second source (models.dev) — same lifecycle, independent backoff. */
+	devData: CatalogData | null;
+	devInflight: Promise<void> | null;
+	devLastFailureAt: number | null;
 }
 
 export function createCatalogManager(): CatalogManager {
-	return { data: null, inflight: null, lastFailureAt: null };
+	return { data: null, inflight: null, lastFailureAt: null, devData: null, devInflight: null, devLastFailureAt: null };
 }
 
 /** Backoff gate: skip background attempts shortly after a failure (manual refresh ignores this). */
 export function shouldAttemptRefresh(mgr: CatalogManager, now: number): boolean {
 	if (mgr.inflight) return false;
 	if (mgr.lastFailureAt !== null && now - mgr.lastFailureAt < CATALOG_RETRY_BACKOFF_MS) return false;
+	return true;
+}
+
+/** Same gate for the models.dev source. */
+export function shouldAttemptDevRefresh(mgr: CatalogManager, now: number): boolean {
+	if (mgr.devInflight) return false;
+	if (mgr.devLastFailureAt !== null && now - mgr.devLastFailureAt < CATALOG_RETRY_BACKOFF_MS) return false;
 	return true;
 }
 
@@ -141,6 +167,38 @@ export function parseLiteLLMCatalog(json: unknown): Record<string, CatalogModelE
 	return out;
 }
 
+/** Parse models.dev api.json: { "<provider-slug>": { models: { "<id>":
+ *  { limit: { context, output }, … } } } } → entries keyed
+ *  "<provider-slug>/<id>". NOTE: entries deliberately carry NO provider
+ *  field — models.dev hosts 200+ gateways whose resale listings use the
+ *  same bare ids as the vendor's own namespace (vancine/glm-5.3-flash vs
+ *  zai/glm-5.3-flash), and nothing in the data distinguishes vendor from
+ *  reseller. So models.dev entries never claim vendor status; they join
+ *  the candidate pools as independent consensus/divergence signals and
+ *  provide fast coverage of new releases (observed: indexed 3 days after
+ *  launch). */
+export function parseModelsDevCatalog(json: unknown): Record<string, CatalogModelEntry> {
+	const out: Record<string, CatalogModelEntry> = {};
+	if (!isPlainObject(json)) return out;
+	for (const [slug, def] of Object.entries(json)) {
+		if (!slug || !isPlainObject(def) || !isPlainObject(def.models)) continue;
+		for (const [id, m] of Object.entries(def.models)) {
+			if (!id || !isPlainObject(m) || !isPlainObject(m.limit)) continue;
+			const entry: CatalogModelEntry = {};
+			if (saneWindow(m.limit.context, CONTEXT_WINDOW_MIN, CONTEXT_WINDOW_MAX)) {
+				entry.contextWindow = m.limit.context;
+			}
+			if (saneWindow(m.limit.output, MAX_TOKENS_MIN, MAX_TOKENS_MAX)) {
+				entry.maxTokens = m.limit.output;
+			}
+			if (entry.contextWindow !== undefined || entry.maxTokens !== undefined) {
+				out[`${slug}/${id}`] = entry;
+			}
+		}
+	}
+	return out;
+}
+
 export interface CatalogIndex {
 	data: CatalogData;
 	/** raw-lowercase and normalized keys -> entry (exact keys registered first, so they win). */
@@ -162,15 +220,36 @@ function entrySignature(entry: CatalogModelEntry): string {
 	return `ctx=${entry.contextWindow ?? "?"} max=${entry.maxTokens ?? "?"}`;
 }
 
-/** A two-segment key "P/model" whose litellm_provider === P is the VENDOR's
- *  own catalog entry ("zai/glm-4.6", provider zai). Hosted deployments
+/** A two-segment key "P/model" whose provider === P is the VENDOR's own
+ *  catalog entry ("zai/glm-4.6", provider zai). Hosted deployments
  *  ("together_ai/zai-org/GLM-5.3-Flash", three segments) and bare keys
- *  (registered as exact matches earlier) never reach this check. */
+ *  (registered as exact matches earlier) never reach this check. Only litellm
+ *  entries qualify: they carry litellm_provider. models.dev entries carry no
+ *  provider field by design and therefore never claim vendor status — its
+ *  namespaces mix vendors and resellers using identical bare ids, and the
+ *  data offers no way to tell them apart. */
 function isVendorEntry(rawKey: string, entry: CatalogModelEntry): boolean {
 	if (entry.provider === undefined) return false;
 	const slash = rawKey.indexOf("/");
 	if (slash <= 0 || rawKey.indexOf("/", slash + 1) !== -1) return false; // not exactly two segments
 	return rawKey.slice(0, slash) === entry.provider;
+}
+
+/** Merge candidates under tolerance: per field, all present values must
+ *  lie within VENDOR_TOLERANCE of each other; the merged value is the
+ *  conservative minimum. Used for vendor candidates (rounding differences
+ *  between catalogs are not disagreements) and for the no-vendor consensus
+ *  tier (same rule, same safety). Returns null on real disagreement. */
+function mergeUnderTolerance(candidates: ReadonlyArray<[string, CatalogModelEntry]>): CatalogModelEntry | null {
+	const ctxs = candidates.map(([, e]) => e.contextWindow).filter((v): v is number => v !== undefined);
+	const maxs = candidates.map(([, e]) => e.maxTokens).filter((v): v is number => v !== undefined);
+	const within = (nums: number[]): boolean =>
+		nums.length === 0 || (Math.max(...nums) - Math.min(...nums)) / Math.min(...nums) <= VENDOR_TOLERANCE;
+	if (!within(ctxs) || !within(maxs)) return null;
+	const merged: CatalogModelEntry = {};
+	if (ctxs.length) merged.contextWindow = Math.min(...ctxs);
+	if (maxs.length) merged.maxTokens = Math.min(...maxs);
+	return merged;
 }
 
 /**
@@ -179,8 +258,10 @@ function isVendorEntry(rawKey: string, entry: CatalogModelEntry): boolean {
  * tiers — vendor truth first, community consensus second, silence third:
  *
  *   1. VENDOR ENTRY WINS: any two-segment "P/model" candidate whose
- *      litellm_provider === P (the vendor's own numbers) beats everyone.
- *      Multiple vendor entries must agree, else the key abstains.
+ *      provider === P (the vendor's own numbers) beats everyone. Vendor
+ *      candidates must agree per VENDOR_TOLERANCE (rounding differences
+ *      between catalogs are not disagreements); the value used is the
+ *      conservative minimum. Real disagreement abstains.
  *   2. NO VENDOR -> CONSENSUS: all candidates agree on the values.
  *   3. DISAGREEMENT -> ABSTAIN: the key lands in `divergent`, lookups miss,
  *      and a warning points the user at /live-models-fix.
@@ -188,8 +269,16 @@ function isVendorEntry(rawKey: string, entry: CatalogModelEntry): boolean {
  *   silently skipped (nothing to cross-check against; observed in the wild:
  *   a hosted deployment stamping its own platform limits, e.g.
  *   together_ai 1048575 where the vendor says 128000).
+ *
+ *  `extraEntries` carries same-key entries from the SECOND source that were
+ *  displaced during merging (both catalogs report "zai/glm-4.6", each with
+ *  its own rounding). They join the arbitration groups but never override
+ *  the exact-key registration.
  */
-export function buildCatalogIndex(models: Record<string, CatalogModelEntry>): CatalogIndex {
+export function buildCatalogIndex(
+	models: Record<string, CatalogModelEntry>,
+	extraEntries?: ReadonlyArray<[string, CatalogModelEntry]>,
+): CatalogIndex {
 	const byKey = new Map<string, CatalogModelEntry>();
 	const divergent = new Map<string, string[]>();
 	const unverified = new Map<string, string>();
@@ -198,32 +287,36 @@ export function buildCatalogIndex(models: Record<string, CatalogModelEntry>): Ca
 		if (!byKey.has(key)) byKey.set(key, entry);
 	}
 	const groups = new Map<string, Array<[string, CatalogModelEntry]>>();
-	for (const pair of raw) {
+	const collect = (pair: [string, CatalogModelEntry]): void => {
 		const norm = normalizeModelKey(pair[0]);
-		if (!norm || norm === pair[0]) continue; // exact key already registered above
+		if (!norm || norm === pair[0]) return; // exact key already registered above
 		const group = groups.get(norm);
 		if (group) group.push(pair);
 		else groups.set(norm, [pair]);
+	};
+	for (const pair of raw) collect(pair);
+	for (const pair of (extraEntries ?? []).map(([k, v]) => [k.toLowerCase(), v] as [string, CatalogModelEntry])) {
+		collect(pair);
 	}
 	for (const [norm, group] of groups) {
 		if (byKey.has(norm)) continue; // an exact key owns this name — its value stands
 		const vendors = group.filter(([key, entry]) => isVendorEntry(key, entry));
 		if (vendors.length > 0) {
-			const signatures = [...new Set(vendors.map(([, e]) => entrySignature(e)))];
-			if (signatures.length === 1) {
-				byKey.set(norm, (vendors[0] as [string, CatalogModelEntry])[1]);
+			const merged = mergeUnderTolerance(vendors);
+			if (merged) {
+				byKey.set(norm, merged);
 			} else {
+				const signatures = [...new Set(group.map(([, e]) => entrySignature(e)))];
 				divergent.set(norm, signatures);
 			}
 			continue;
 		}
 		const signatures = [...new Set(group.map(([, e]) => entrySignature(e)))];
-		if (signatures.length === 1) {
-			if (group.length >= 2) {
-				byKey.set(norm, (group[0] as [string, CatalogModelEntry])[1]); // consensus of independent sources
-			} else {
-				unverified.set(norm, (signatures as string[])[0] as string); // nothing to cross-check
-			}
+		const merged = mergeUnderTolerance(group);
+		if (merged !== null && group.length >= 2) {
+			byKey.set(norm, merged); // consensus of independent sources (tolerant, conservative)
+		} else if (group.length === 1) {
+			unverified.set(norm, (signatures as string[])[0] as string); // nothing to cross-check
 		} else {
 			divergent.set(norm, signatures);
 		}
@@ -239,9 +332,9 @@ export function catalogLookup(index: CatalogIndex, id: string): CatalogModelEntr
 // ---------------------------------------------------------------- disk cache
 
 /** Read the disk cache; null when missing/malformed. Never throws. */
-export function readCatalogCache(): CatalogData | null {
+export function readCatalogCache(file: string): CatalogData | null {
 	try {
-		const raw: unknown = JSON.parse(fs.readFileSync(catalogPath(), "utf8"));
+		const raw: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
 		if (
 			isPlainObject(raw) &&
 			typeof raw.url === "string" &&
@@ -257,9 +350,9 @@ export function readCatalogCache(): CatalogData | null {
 }
 
 /** Persist the cache; failures are warnings (enrichment must not crash pi). */
-export function writeCatalogCache(data: CatalogData): void {
+export function writeCatalogCache(data: CatalogData, file: string): void {
 	try {
-		fs.writeFileSync(catalogPath(), JSON.stringify(data), "utf8");
+		fs.writeFileSync(file, JSON.stringify(data), "utf8");
 	} catch (err) {
 		console.warn(`${LOG} catalog cache write failed:`, err instanceof Error ? err.message : err);
 	}
@@ -286,41 +379,113 @@ export async function fetchCatalogData(signal?: AbortSignal): Promise<CatalogDat
 	throw new Error(`all catalog sources failed (last: ${lastError instanceof Error ? lastError.message : String(lastError)})`);
 }
 
-/**
- * Soft ensure: load the disk cache once; if it is missing or stale, kick a
- * deduplicated background refresh and return whatever is available now
- * (possibly null/stale). Never throws, never blocks on the network.
- */
-export function ensureCatalogSoft(mgr: CatalogManager): CatalogData | null {
-	if (!mgr.data) mgr.data = readCatalogCache();
-	if (!mgr.data || Date.now() - mgr.data.fetchedAt >= CATALOG_TTL_MS) {
-		if (shouldAttemptRefresh(mgr, Date.now())) kickRefresh(mgr);
+/** Fetch + parse models.dev (single URL, independent failure domain). */
+export async function fetchModelsDevData(signal?: AbortSignal): Promise<CatalogData> {
+	try {
+		const timeout = AbortSignal.timeout(FETCH_TIMEOUT_MS);
+		const res = await fetch(MODELSDEV_URL, { signal: signal ? AbortSignal.any([timeout, signal]) : timeout });
+		if (!res.ok) throw new Error(`HTTP ${res.status}`);
+		const models = parseModelsDevCatalog(await res.json());
+		if (!Object.keys(models).length) throw new Error("no usable entries in response");
+		return { url: MODELSDEV_URL, fetchedAt: Date.now(), models };
+	} catch (err) {
+		if (signal?.aborted) throw err;
+		throw new Error(`models.dev source failed (${err instanceof Error ? err.message : String(err)})`);
 	}
-	return mgr.data;
 }
 
-function kickRefresh(mgr: CatalogManager): void {
-	if (mgr.inflight) return;
-	mgr.inflight = fetchCatalogData()
+// -------------------------------------------------------------------- merge
+
+/** Two-source view handed to callers: non-conflicting models merged, and
+ *  same-key entries from the second source listed separately so they can
+ *  join arbitration (both catalogs report "zai/glm-4.6", each with its own
+ *  rounding — the vendor-tolerance merge settles it). */
+export interface CatalogView {
+	data: CatalogData;
+	extraEntries: Array<[string, CatalogModelEntry]>;
+}
+
+export function mergeCatalogSources(primary: CatalogData | null, secondary: CatalogData | null): CatalogView | null {
+	if (!primary && !secondary) return null;
+	const models: Record<string, CatalogModelEntry> = {};
+	const extraEntries: Array<[string, CatalogModelEntry]> = [];
+	for (const [k, v] of Object.entries(primary?.models ?? {})) models[k] = v;
+	for (const [k, v] of Object.entries(secondary?.models ?? {})) {
+		if (models[k] === undefined) models[k] = v;
+		else extraEntries.push([k, v]);
+	}
+	const data: CatalogData = {
+		url: primary && secondary ? `${primary.url} + ${secondary.url}` : (primary ?? secondary)!.url,
+		fetchedAt: Math.max(primary?.fetchedAt ?? 0, secondary?.fetchedAt ?? 0),
+		models,
+	};
+	return { data, extraEntries };
+}
+
+/**
+ * Soft ensure: load both disk caches once; if either is missing or stale,
+ * kick a deduplicated background refresh for it and return the merged view
+ * of whatever is available now (possibly null/stale). Never throws, never
+ * blocks on the network. Each source backs off independently.
+ */
+export function ensureCatalogSoft(mgr: CatalogManager): CatalogView | null {
+	if (!mgr.data) mgr.data = readCatalogCache(catalogPath());
+	if (!mgr.data || Date.now() - mgr.data.fetchedAt >= CATALOG_TTL_MS) {
+		if (shouldAttemptRefresh(mgr, Date.now())) kickRefresh(mgr, "litellm");
+	}
+	if (!mgr.devData) mgr.devData = readCatalogCache(modelsDevCatalogPath());
+	if (!mgr.devData || Date.now() - mgr.devData.fetchedAt >= CATALOG_TTL_MS) {
+		if (shouldAttemptDevRefresh(mgr, Date.now())) kickRefresh(mgr, "dev");
+	}
+	return mergeCatalogSources(mgr.data, mgr.devData);
+}
+
+function kickRefresh(mgr: CatalogManager, which: "litellm" | "dev"): void {
+	const isMain = which === "litellm";
+	if (isMain ? mgr.inflight : mgr.devInflight) return;
+	const job = (isMain ? fetchCatalogData() : fetchModelsDevData())
 		.then((data) => {
-			mgr.data = data;
-			mgr.lastFailureAt = null;
-			writeCatalogCache(data);
+			if (isMain) {
+				mgr.data = data;
+				mgr.lastFailureAt = null;
+				writeCatalogCache(data, catalogPath());
+			} else {
+				mgr.devData = data;
+				mgr.devLastFailureAt = null;
+				writeCatalogCache(data, modelsDevCatalogPath());
+			}
 		})
 		.catch((err) => {
-			mgr.lastFailureAt = Date.now();
-			console.warn(`${LOG} catalog refresh failed (will retry in ${Math.round(CATALOG_RETRY_BACKOFF_MS / 60_000)}min): ${err instanceof Error ? err.message : err}`);
+			if (isMain) mgr.lastFailureAt = Date.now();
+			else mgr.devLastFailureAt = Date.now();
+			console.warn(`${LOG} ${isMain ? "litellm" : "models.dev"} refresh failed (will retry in ${Math.round(CATALOG_RETRY_BACKOFF_MS / 60_000)}min): ${err instanceof Error ? err.message : err}`);
 		})
 		.finally(() => {
-			mgr.inflight = null;
+			if (isMain) mgr.inflight = null;
+			else mgr.devInflight = null;
 		});
+	if (isMain) mgr.inflight = job;
+	else mgr.devInflight = job;
 }
 
-/** Blocking refresh — used by /live-models-catalog-refresh. Throws on failure. */
-export async function refreshCatalogNow(mgr: CatalogManager): Promise<CatalogData> {
-	const data = await fetchCatalogData();
-	mgr.data = data;
-	mgr.lastFailureAt = null;
-	writeCatalogCache(data);
-	return data;
+/** Blocking refresh of both sources — used by /live-models-catalog-refresh.
+ *  Throws only when BOTH sources fail; a partial refresh still applies the
+ *  successful one and returns the merged view. */
+export async function refreshCatalogNow(mgr: CatalogManager): Promise<CatalogView> {
+	const results = await Promise.allSettled([fetchCatalogData(), fetchModelsDevData()]);
+	if (results[0].status === "fulfilled") {
+		mgr.data = results[0].value;
+		mgr.lastFailureAt = null;
+		writeCatalogCache(results[0].value, catalogPath());
+	}
+	if (results[1].status === "fulfilled") {
+		mgr.devData = results[1].value;
+		mgr.devLastFailureAt = null;
+		writeCatalogCache(results[1].value, modelsDevCatalogPath());
+	}
+	if (results[0].status === "rejected" && results[1].status === "rejected") {
+		const reason = (results[0] as PromiseRejectedResult).reason;
+		throw new Error(`all catalog sources failed (${reason instanceof Error ? reason.message : String(reason)})`);
+	}
+	return mergeCatalogSources(mgr.data, mgr.devData) as CatalogView;
 }
