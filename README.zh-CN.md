@@ -74,7 +74,7 @@ pi install git:github.com/wait4xx/pi-live-models
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `baseUrl` | ✅ | API 根地址。模型端点自动推导：以 `/v1` 结尾 → `{base}/models`，否则 → `{base}/v1/models`。 |
+| `baseUrl` | ✅ | API 根地址。模型端点自动推导：以版本段（`/v1`、`/v2`…）结尾 → `{base}/models`，否则 → `{base}/v1/models`。 |
 | `modelsUrl` | — | 推导规则不适用时，显式指定模型端点。 |
 | `api` | — | `openai-completions` / `openai-responses` / `anthropic-messages`。覆盖内置 provider 时可省略（继承原定义）。 |
 | `name` | — | 显示名。 |

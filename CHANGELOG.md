@@ -15,7 +15,7 @@ Filter presets, field-level filtering, live pricing, static union, and a forced-
 ### Changed
 
 - Offline cache format v2: entries now persist the **raw endpoint items** so the fallback path rebuilds through the full pipeline (field filters, merge ladder, union) with current rules, instead of re-filtering merged defs by id only. v1 caches remain readable (best-effort id-only re-filter) and entries upgrade to v2 on the next successful refresh (the version marker is rewritten on the first cache write).
-- Single shared cache instance across the extension lifetime; refresh closures capture the state object (not a cache instance), so entries written by in-flight refreshes can never be rolled back by a stale full-file write after `/live-models-reload`.
+- Single shared cache instance across the extension lifetime; refresh closures capture the long-lived state object (swapped in place on reload), so entries written by in-flight refreshes cannot be rolled back by a stale full-file write across reloads. (Providers removed from the config in a later reload cannot be un-registered — a pi `registerProvider` limitation — their stale closures simply keep the previous catalog.)
 - Duplicate live ids (gateway aliasing) are deduplicated — first occurrence wins.
 - `buildCatalog()` extracted as a pure function (live discovery, cache rebuild, and tests share one pipeline).
 

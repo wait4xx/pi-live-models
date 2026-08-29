@@ -92,7 +92,7 @@ File: `~/.pi/agent/live-models.json` (respects `$PI_CODING_AGENT_DIR`). Validati
 
 | Field | Required | Description |
 |---|---|---|
-| `baseUrl` | ✅ | API root. Models endpoint is derived: ends with `/v1` → `{base}/models`, otherwise → `{base}/v1/models`. |
+| `baseUrl` | ✅ | API root. Models endpoint is derived: ends with a version segment (`/v1`, `/v2`, …) → `{base}/models`, otherwise → `{base}/v1/models`. |
 | `modelsUrl` | — | Explicit models-endpoint override when the derivation rule does not fit. |
 | `api` | — | `openai-completions` / `openai-responses` / `anthropic-messages`. Can be omitted when overriding a built-in provider (the definition is inherited). |
 | `name` | — | Display name. |

@@ -314,10 +314,14 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 		description: "Reload live-models.json and re-register providers (takes effect immediately)",
 		handler: async (_args, ctx) => {
 			const next: ExtensionState = { ...buildState(), cache: readCache() };
-			registerAll(pi, next);
+			// Mutate the long-lived `state` in place BEFORE registering, so every
+			// closure (including ones from earlier reloads) keeps reading the
+			// same state object — passing `next` itself would strand prior
+			// generations on stale cache instances.
 			state.config = next.config;
 			state.runtimes = next.runtimes;
 			state.cache = next.cache;
+			registerAll(pi, state);
 			ctx.ui.notify(`${LOG} reloaded ${configPath()}\n${state.runtimes.size} provider(s) re-registered. Open /model to trigger live discovery.`);
 		},
 	});

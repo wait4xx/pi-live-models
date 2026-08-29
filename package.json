@@ -14,6 +14,9 @@
     "openrouter"
   ],
   "license": "MIT",
+  "engines": {
+    "node": ">=20.3"
+  },
   "author": "wait4xx",
   "repository": {
     "type": "git",
