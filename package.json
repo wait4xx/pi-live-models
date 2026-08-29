@@ -15,6 +15,14 @@
   ],
   "license": "MIT",
   "author": "wait4xx",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wait4xx/pi-live-models.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wait4xx/pi-live-models/issues"
+  },
+  "homepage": "https://github.com/wait4xx/pi-live-models#readme",
   "files": [
     "extensions",
     "README.md",
