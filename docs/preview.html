@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1200px; height: 630px; }
+  body {
+    font-family: "Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace;
+    background: linear-gradient(135deg, #0a0e1a 0%, #101627 55%, #0d1526 100%);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .stage { position: relative; }
+  .glow {
+    position: absolute; inset: -40px; z-index: 0;
+    background: radial-gradient(ellipse at 30% 20%, rgba(63,185,80,0.10), transparent 55%),
+                radial-gradient(ellipse at 80% 90%, rgba(88,166,255,0.10), transparent 55%);
+  }
+  .terminal {
+    position: relative; z-index: 1;
+    width: 1120px; border-radius: 12px; overflow: hidden;
+    background: #0d1117;
+    border: 1px solid #2b3442;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.55), 0 4px 16px rgba(0,0,0,0.4);
+  }
+  .titlebar {
+    height: 38px; background: #161b22;
+    display: flex; align-items: center; gap: 8px; padding: 0 16px;
+    border-bottom: 1px solid #21262d;
+  }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .dot.r { background: #ff5f57; } .dot.y { background: #febc2e; } .dot.g { background: #28c840; }
+  .title {
+    flex: 1; text-align: center; color: #6e7681; font-size: 13px; letter-spacing: 0.4px;
+  }
+  .body { padding: 18px 24px 20px; font-size: 14.5px; line-height: 1.62; color: #c9d1d9; white-space: pre; }
+  .dim  { color: #7d8590; }
+  .log  { color: #7d8590; }
+  .cmd  { color: #e6edf3; }
+  .ps   { color: #3fb950; font-weight: 600; }
+  .slash { color: #58a6ff; font-weight: 600; }
+  .ok   { color: #3fb950; }
+  .bad  { color: #f85149; }
+  .reason-ok  { color: #7ee787; }
+  .reason-bad { color: #ffa198; }
+  .num  { color: #d2a8ff; }
+  .sum  { color: #e3b341; }
+  .cost { color: #79c0ff; }
+  .dim  { color: #8b949e; }
+  .warn { color: #e3b341; }
+  .url  { color: #8b949e; text-decoration: none; }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <div class="glow"></div>
+    <div class="terminal">
+      <div class="titlebar">
+        <div class="dot r"></div><div class="dot y"></div><div class="dot g"></div>
+        <div class="title">pi — live model discovery</div>
+      </div>
+      <div class="body">┌ <span class="cmd"><span class="ps">➜</span>  pi install <span class="num">npm:pi-live-models</span></span>
+└ ✓ installed — configure providers in ~/.pi/agent/live-models.json
+
+<span class="slash">/live-models-test</span> <span class="cmd">OPENROUTER</span>
+<span class="log">[pi-live-models]</span> testing OPENROUTER — <span class="url">https://openrouter.ai/api/v1/models</span> ...
+<span class="log">[pi-live-models]</span> OPENROUTER dry-run — <span class="url">https://openrouter.ai/api/v1/models</span>
+  <span class="ok">+</span> openrouter/free-deepseek-r1     <span class="reason-ok">(kept by include:openrouter/free*)</span>
+  <span class="ok">+</span> openrouter/free-qwen3-235b      <span class="reason-ok">(kept by include:openrouter/free*)</span>
+  <span class="bad">-</span> meta-llama/llama-4-scout        <span class="reason-bad">-&gt; dropped by whitelist-miss</span>
+  <span class="bad">-</span> openrouter/auto                 <span class="reason-bad">-&gt; dropped by excludeBy:owned_by:system</span>
+<span class="sum">summary:</span> 42 raw -&gt; 2 kept (40 dropped)
+<span class="dim">metadata preview:</span>
+  openrouter/free-deepseek-r1: ctx=163840 <span class="dim">(catalog)</span> max=65536 <span class="dim">(live)</span> cost=<span class="cost">0/0</span> $/1M input=text
+  openrouter/free-qwen3-235b:  ctx=262144 <span class="dim">(catalog)</span> max=131072 <span class="dim">(live)</span> cost=<span class="cost">0/0</span> $/1M input=text
+
+<span class="slash">/live-models-refresh</span> <span class="cmd">GLM OPENROUTER</span>
+<span class="log">[pi-live-models]</span> forced refresh
+  <span class="ok">OK</span>   GLM: 10 models
+  <span class="warn">⚠</span>    glm-4.6: gateway ctx=128000 vs public catalog 202800 — fix: <span class="slash">/live-models-fix</span> <span class="cmd">GLM glm-4.6 ctx=202800</span>
+  <span class="ok">OK</span>   OPENROUTER: 2 models</div>
+    </div>
+  </div>
+</body>
+</html>

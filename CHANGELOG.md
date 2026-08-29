@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.0] - 2026-08-29
+
+Public metadata catalog (gateway cross-check), README preview image, and three new commands.
+
+### Added
+
+- **Public metadata catalog** — a background-fetched community catalog (LiteLLM's `model_prices_and_context_window.json`, ~2500 chat models) cross-checks gateway-reported metadata. Sources: jsDelivr CDN → raw.githubusercontent.com fallback (20 s timeout each); disk cache `~/.pi/agent/live-models-catalog.json` with a 7-day TTL and a 30-minute retry backoff after failures; never blocks discovery. Matching is exact-name only (provider prefixes, `:suffix` tags and date suffixes normalized for lookup; an exact catalog key always beats a normalized one); chat-mode entries (entries without a `mode` field are kept); values must pass sanity windows. New merge-ladder layer between live hints and overrides — a catalog value beats the gateway's claim, and your `overrides[id]` still win. Opt out per provider with `"catalog": false` (also suppresses catalog warnings).
+- **Sanity windows on live metadata** — live `context_length`/`max_tokens`-family values must be integers in 1,024–10,000,000 (context) / 128–10,000,000 (max output) to win a ladder layer; implausible values (`0`, `100`, `1e12`, floats) fall through instead of poisoning metadata.
+- **Catalog warnings** — surfaced by `/live-models-test` and `/live-models-refresh` (capped at 6 warnings, plus an omission notice): gateway context diverging ≥4× from the catalog in either direction (with a ready-made `/live-models-fix <provider> <model> ctx=<catalog value>` hint), and uniform placeholder detection (≥3 kept models sharing one identical live context value — the classic relay stamp).
+- **`/live-models-catalog`** — catalog status: source URL, cache age, entry count, cache path.
+- **`/live-models-catalog-refresh`** — force a blocking catalog refetch.
+- **`/live-models-fix <provider> <model> ctx=<n> [max=<n>]`** — write a metadata correction into `overrides` in `live-models.json` (JSON-preserve write via tmp+rename; sibling fields and key order untouched). Validates the provider, sanity windows, and the provider's known model ids (last live list ∪ persisted cache; skipped when nothing has been discovered yet).
+- **`pi.image`** — package preview image on the pi package gallery.
+- README preview image (en/zh).
+
+### Changed
+
+- Metadata merge ladder is now six layers (low → high): `entry.defaults` < static definitions < live hints < **public catalog** < `entry.overrides[id]` < pi-safe fallback, with sanity windows guarding the live layer.
+- `/live-models-test` metadata preview now annotates each field's winning source: `ctx=202800 (catalog)`, `max=… (live)`.
+
 ## [0.2.0] - 2026-08-29
 
 Filter presets, field-level filtering, live pricing, static union, and a forced-refresh command.

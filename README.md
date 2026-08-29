@@ -7,6 +7,10 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
+<p align="center">
+  <img src="docs/preview.png" alt="pi-live-models — live model discovery preview" width="720">
+</p>
+
 Live `/v1/models` discovery for [pi](https://github.com/earendil-works/pi) — make every provider's model list reflect what the endpoint **actually serves**, refreshed every time you open `/model`.
 
 Works with **any** OpenAI-compatible or Anthropic-protocol gateway (OpenRouter, relay services, vLLM, LiteLLM, LM Studio, cloud vendors, …), **and** overrides the static catalogs of pi's **built-in** providers — `registerProvider()` with the same id layers on top of the composed base, and a non-empty live list fully replaces it.
@@ -21,6 +25,7 @@ Works with **any** OpenAI-compatible or Anthropic-protocol gateway (OpenRouter, 
   - [Filters](#filters)
   - [Presets](#presets)
   - [Auth chain](#auth-chain-discovery-request)
+  - [Public metadata catalog](#public-metadata-catalog)
   - [Metadata merge ladder](#metadata-merge-ladder-low--high)
 - [Commands](#commands)
 - [Offline cache & failure behavior](#offline-cache--failure-behavior)
@@ -44,7 +49,8 @@ One config file, zero code, zero runtime dependencies.
 - 🚫 **Zero filtering by default** — the extension has no opinions about which models are "good". Every filter is yours: glob (`*audio*`), regex (`^glm-4\.`), field-level rules (`includeBy`/`excludeBy` on dotted paths into the live item, e.g. `owned_by`, `architecture.input_modalities`), and reusable **presets**. Exclude always wins; a non-empty include set acts as a whitelist.
 - 🔍 **Filter observability** — `/live-models` shows `raw -> kept` statistics; `/live-models-test <provider>` dry-runs discovery and annotates **every** model with its keep/drop reason; `/live-models-refresh [ids...]` forces an immediate refresh bypassing `refreshIntervalMs`.
 - 🔑 **Credential reuse** — discovery reuses the key you already have: `/login` stored credential → entry `apiKey` (`$ENV` / `${ENV}` / `!command` / literal) → `models.json` → `<PROVIDER>_API_KEY` env. Keys never appear in logs or errors.
-- 🪜 **Metadata merge ladder** — `defaults` < static definitions (`models.json` + `models-store.json`, by id) < live endpoint hints (`context_length`, `max_completion_tokens`, OpenRouter `top_provider.*` and `pricing.*` cost) < `overrides[id]`. New models get sane fallbacks instead of blank metadata. `mergeStatic: "union"` can additionally register static-only models the gateway forgot to list.
+- 🪜 **Metadata merge ladder** — `defaults` < static definitions (`models.json` + `models-store.json`, by id) < live endpoint hints (`context_length`, `max_completion_tokens`, OpenRouter `top_provider.*` and `pricing.*` cost) < **public catalog** (LiteLLM data, exact match only) < `overrides[id]`. New models get sane fallbacks instead of blank metadata. `mergeStatic: "union"` can additionally register static-only models the gateway forgot to list.
+- 🌐 **Public metadata catalog** — relays often misreport metadata (`context_length: 128000` stamped on every model). A community catalog (LiteLLM's `model_prices_and_context_window.json`) cross-checks the gateway: exact-name matches correct `contextWindow`/`maxTokens`, implausible live values are rejected by sanity windows, and suspicious patterns (≥4× divergence from the catalog, uniform placeholder values) are surfaced with a ready-made `/live-models-fix` hint. Cache-backed, background-refreshed, one flag to disable per provider.
 - 🛡️ **Never empties your catalog** — a refresh that yields 0 usable models throws and pi keeps the previous list; network failures fall back to a persisted last-good cache (raw items re-filtered and re-merged with your *current* rules), so a gateway outage never blanks `/model` after a restart.
 - 📦 Zero runtime dependencies · TypeScript · unit-tested · CI on Windows + Ubuntu.
 
@@ -103,6 +109,7 @@ File: `~/.pi/agent/live-models.json` (respects `$PI_CODING_AGENT_DIR`). Validati
 | `compat` | — | Provider-level compat fallback for models without one (e.g. `{"thinkingFormat":"qwen"}`). |
 | `filters` | — | See [Filters](#filters). |
 | `costFromLive` | — | Live pricing fill strategy (OpenRouter-style `pricing.*`, $/token → $/1M): `"fill-zero"` (default) / `"always"` / `"off"`. Details in the [merge ladder](#metadata-merge-ladder-low--high). |
+| `catalog` | — | `true` (default) / `false` — opt out of the public metadata catalog for this provider. See [Public metadata catalog](#public-metadata-catalog). |
 | `mergeStatic` | — | `"live"` (default) or `"union"` — also register static-only models from `models.json`/`models-store.json`. |
 | `defaults` | — | Metadata fallback for all models: `reasoning`, `input`, `contextWindow`, `maxTokens`, `cost`. |
 | `overrides` | — | Per-model-id metadata overrides: `{"qwen3.8-max":{"contextWindow":1000000}}`. |
@@ -164,9 +171,32 @@ Presets cannot reference other presets; unknown preset names are warned + ignore
 
 ⚠️ The `!command` form executes a shell command — only use it if you understand what it runs. Keys never appear in logs or errors; the cache file stores model metadata only, never credentials.
 
+### Public metadata catalog
+
+Many relay gateways stamp every model with the same `context_length` (usually `128000`), or omit metadata entirely. The public catalog is an independent cross-check, built from **LiteLLM's** community-maintained [`model_prices_and_context_window.json`](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) (~2500 chat models).
+
+**How it works**
+
+- **Sources**: jsDelivr CDN first, raw.githubusercontent.com fallback — fetched in the background, never blocking discovery. On failure, discovery proceeds without the catalog and retries after a 30-minute backoff.
+- **Cache**: `~/.pi/agent/live-models-catalog.json`, refreshed in the background after 7 days. `/live-models-catalog-refresh` forces a refetch.
+- **Matching**: exact model-name match only — no fuzzy matching, ever. `provider/` prefixes, `:suffix` tags (`:free`, `:latest`) and date suffixes (`gpt-4o-2024-11-20`) are normalized for the lookup; an exact catalog entry always beats a normalized one.
+- **Scope**: chat-mode entries (entries without a `mode` field are kept); values must pass sanity windows (context 1,024–10,000,000 tokens, max output 128–10,000,000).
+
+**What it changes**
+
+- The ladder gains a layer between live hints and your overrides — a trusted catalog value beats the gateway's claim (see [merge ladder](#metadata-merge-ladder-low--high)).
+- **Implausible live values are quarantined**: a live `context_length` of `0`, `100` or `10¹²` no longer poisons metadata — sanity windows reject it before it can win.
+- **Suspicious patterns are surfaced** by `/live-models-test` and `/live-models-refresh`:
+  - gateway context diverges ≥4× from the catalog (either direction) → warning with a ready-made `/live-models-fix <provider> <model> ctx=<catalog value>` command;
+  - ≥3 models sharing one identical live context value → uniform-placeholder warning (classic relay stamp).
+
+Don't want any of this? One field: `"catalog": false` on the provider entry — no catalog lookups, no catalog warnings. (The sanity windows on live values stay on: an implausible `context_length` never wins regardless.)
+
 ### Metadata merge ladder (low → high)
 
-`entry.defaults` < static definitions (`models.json` entry + `models-store.json` cache, matched by id) < live endpoint hints (`context_length`, `context_window`, `max_model_len`, `max_completion_tokens`, `max_tokens`, OpenRouter `top_provider.*`) < `entry.overrides[id]`
+`entry.defaults` < static definitions (`models.json` entry + `models-store.json` cache, matched by id) < live endpoint hints (`context_length`, `context_window`, `max_model_len`, `max_completion_tokens`, `max_tokens`, OpenRouter `top_provider.*`) < public catalog (exact match, [see above](#public-metadata-catalog)) < `entry.overrides[id]`
+
+Live values must pass sanity windows before they can win a layer: context integer 1,024–10,000,000 tokens, max output 128–10,000,000. A rejected live value falls through to the next layer instead of propagating. `/live-models-test` annotates the preview with the winning source for each field (`ctx=202800 (catalog)`, `max=… (live)`).
 
 **Cost** follows the same ladder, moderated by `costFromLive`:
 
@@ -190,6 +220,9 @@ Live-only models fall back to `defaults`, then to pi-safe values (`reasoning: tr
 | `/live-models-reload` | Re-read the config file and re-register immediately (no restart). |
 | `/live-models-test <provider>` | Dry-run one discovery: per-model `kept by …` / `dropped by …` annotation plus a metadata preview (context window, cost, input types). |
 | `/live-models-refresh [ids...]` | Force an immediate live refresh, bypassing `refreshIntervalMs` (no argument = all providers). Updates the in-memory catalog and the persisted cache; failures are shown verbatim (no cache fallback for manual actions). |
+| `/live-models-catalog` | Show public-catalog status: source URL, cache age, entry count, cache path. |
+| `/live-models-catalog-refresh` | Force a blocking refetch of the public metadata catalog. |
+| `/live-models-fix <provider> <model> ctx=<n> [max=<n>]` | Write a metadata correction into `overrides` in `live-models.json` (atomically, preserving the rest of the file), then run `/live-models-reload` to apply. Validates against the sanity windows and the provider's known model ids. |
 
 ## Offline cache & failure behavior
 
@@ -201,6 +234,7 @@ Live-only models fall back to `defaults`, then to pi-safe values (`reasoning: tr
 | Live endpoint returns 0 models | Same as above — `mergeStatic: "union"` is a supplement, not a fallback. |
 | Caller aborts (list mode, `/model` closed mid-flight) | Rethrown as-is — no warnings, no cache fallback. |
 | Manual `/live-models-refresh` fails | Verbatim error report — manual actions never mask failures with cached data. |
+| Catalog fetch fails | Discovery proceeds without it; a background retry happens after a 30-minute backoff (or force it with `/live-models-catalog-refresh`). |
 
 ## Recipes
 
@@ -260,10 +294,18 @@ Live-only models fall back to `defaults`, then to pi-safe values (`reasoning: tr
 }
 ```
 
+**Gateway misreports context windows** (every model stamped `context_length: 128000`): nothing to configure — the public catalog corrects exact matches automatically, and `/live-models-test` flags the mismatches. For a model the catalog doesn't know (or to pin your own value), write an override from the terminal:
+
+```
+/live-models-fix GLM glm-4.6 ctx=202800
+/live-models-reload
+```
+
 ## Safety notes
 
-- The extension performs `GET` requests only against URLs **you** configure; no bundled endpoints, no telemetry.
-- The cache file stores model metadata only — never credentials.
+- The extension performs `GET` requests only against URLs **you** configure, plus the single optional public-catalog read (jsDelivr/raw.githubusercontent, no query parameters, no credentials); no bundled endpoints, no telemetry.
+- The cache files store model metadata only — never credentials.
+- Catalog data is community-maintained and matched exactly; it can be wrong or missing, and overrides always take precedence.
 - Invalid config fields degrade gracefully (warned and ignored); config typos never crash pi startup.
 
 ## Development
@@ -271,7 +313,7 @@ Live-only models fall back to `defaults`, then to pi-safe values (`reasoning: tr
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # node:test via tsx (42 tests)
+npm test            # node:test via tsx (62 tests)
 npm run smoke       # register against the real config (no TUI)
 npx tsx scripts/smoke.ts GLM   # + one live refreshModels pass for GLM
 ```

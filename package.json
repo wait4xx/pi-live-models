@@ -1,6 +1,6 @@
 {
   "name": "pi-live-models",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Live /v1/models discovery for pi — any OpenAI-compatible or Anthropic gateway, plus built-in provider catalog overrides. Config-driven filters, metadata merge ladder, credential reuse, offline cache.",
   "type": "module",
   "keywords": [
@@ -46,6 +46,7 @@
   "pi": {
     "extensions": [
       "./extensions"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/wait4xx/pi-live-models/main/docs/preview.png"
   }
 }

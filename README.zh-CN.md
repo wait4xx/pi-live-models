@@ -7,6 +7,10 @@
 
 [English](README.md) · **简体中文**
 
+<p align="center">
+  <img src="docs/preview.png" alt="pi-live-models — 实时模型发现预览" width="720">
+</p>
+
 让 [pi](https://github.com/earendil-works/pi) 每个 provider 的模型列表**实时反映端点真实可用模型**——每次打开 `/model` 自动刷新。
 
 适用于**任意** OpenAI 兼容 / Anthropic 协议网关（OpenRouter、各类中转、vLLM、LiteLLM、LM Studio、云厂商…），也能覆盖 pi **内置 provider** 的静态目录——同名 `registerProvider` 叠加在既有定义之上，非空实时列表整体替换静态目录。
@@ -26,7 +30,8 @@
 - 🚫 **默认零过滤**——扩展对"哪些模型好"没有任何预设观点，规则全部来自你的配置：通配符（`*audio*`）、正则（`^glm-4\.`）、**字段级规则**（`includeBy`/`excludeBy`，按点路径匹配 live item 任意字段，如 `owned_by`、`architecture.input_modalities`）、可复用**预设**（`presets`）。exclude 永远优先；include 非空即白名单。
 - 🔍 **过滤可观测**——`/live-models` 显示 `raw -> kept` 统计；`/live-models-test <provider>` 干跑并**逐模型**标注保留/丢弃原因；`/live-models-refresh [ids...]` 绕过节流强制立即刷新。
 - 🔑 **凭据复用**——刷新复用你已有的密钥：`/login` 存储凭据 → 条目 `apiKey`（`$ENV` / `${ENV}` / `!命令` / 明文）→ `models.json` → `<PROVIDER>_API_KEY` 环境变量，四级链式解析。密钥永不落日志、永不落缓存。
-- 🪜 **元数据合并阶梯**——`defaults` < 静态定义（`models.json` + `models-store.json`，按 id 匹配）< 端点提示（`context_length`、`max_completion_tokens`、OpenRouter `top_provider.*` 与 `pricing.*` 价格）< `overrides[id]`。新模型也有合理兜底值而非空白元数据。`mergeStatic: "union"` 还能把网关列表里缺失的静态模型补注册进来。
+- 🪜 **元数据合并阶梯**——`defaults` < 静态定义（`models.json` + `models-store.json`，按 id 匹配）< 端点提示（`context_length`、`max_completion_tokens`、OpenRouter `top_provider.*` 与 `pricing.*` 价格）< **公共目录**（LiteLLM 社区数据，仅精确匹配）< `overrides[id]`。新模型也有合理兜底值而非空白元数据。`mergeStatic: "union"` 还能把网关列表里缺失的静态模型补注册进来。
+- 🌐 **公共元数据目录**——中转站常常乱报元数据（所有模型都盖一个 `context_length: 128000`）。社区目录（LiteLLM 的 `model_prices_and_context_window.json`）交叉校验网关：精确同名匹配纠正 `contextWindow`/`maxTokens`，离谱的 live 值被合理性窗口拦截，可疑模式（与目录相差 ≥4×、多模型同一占位值）主动告警并给出 `/live-models-fix` 现成命令。缓存支撑、后台刷新、一个字段即可按 provider 关闭。
 - 🛡️ **永不清空目录**——过滤后 0 模型即报错，pi 保留上一份列表；网络故障回落磁盘缓存（按**当前**规则完整重建），网关挂掉重启也不会空白 `/model`。
 - 📦 零运行时依赖 · TypeScript · 单元测试 · Windows + Ubuntu 双平台 CI。
 
@@ -85,6 +90,7 @@ pi install git:github.com/wait4xx/pi-live-models
 | `compat` | — | provider 级 compat 兜底（如 `{"thinkingFormat":"qwen"}`）。 |
 | `filters` | — | 见[过滤器](#过滤器)。 |
 | `costFromLive` | — | live 价格填充策略（OpenRouter 风格 `pricing.*`，$/token → $/1M）：`"fill-zero"`（默认）/ `"always"` / `"off"`。详见[合并阶梯](#元数据合并阶梯低--高)。 |
+| `catalog` | — | `true`（默认）/ `false`——按 provider 退出公共元数据目录。见[公共元数据目录](#公共元数据目录)。 |
 | `mergeStatic` | — | `"live"`（默认）或 `"union"`——把 `models.json`/`models-store.json` 里有、网关列表里没有的静态模型也注册进来。 |
 | `defaults` | — | 全部模型的元数据兜底：`reasoning`、`input`、`contextWindow`、`maxTokens`、`cost`。 |
 | `overrides` | — | 按模型 id 的元数据覆盖：`{"qwen3.8-max":{"contextWindow":1000000}}`。 |
@@ -146,9 +152,32 @@ pi install git:github.com/wait4xx/pi-live-models
 
 ⚠️ `!命令` 形式会执行 shell 命令——请先弄清它跑的是什么。密钥永不落日志与错误信息；缓存文件只存模型元数据，绝不存凭据。
 
+### 公共元数据目录
+
+大量中转网关给所有模型盖上同一个 `context_length`（通常是 `128000`），或干脆不报元数据。公共目录是独立的交叉校验源，数据来自 **LiteLLM** 社区维护的 [`model_prices_and_context_window.json`](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)（约 2500 个 chat 模型）。
+
+**怎么运作**
+
+- **数据源**：先 jsDelivr CDN，再 raw.githubusercontent.com 兜底——后台拉取，绝不阻塞发现流程。失败时发现照常进行（无目录参与），30 分钟退避后自动重试。
+- **缓存**：`~/.pi/agent/live-models-catalog.json`，7 天后台刷新。`/live-models-catalog-refresh` 可强制重拉。
+- **匹配**：仅精确同名匹配——永不做模糊匹配。`provider/` 前缀、`:suffix` 标签（`:free`、`:latest`）、日期后缀（`gpt-4o-2024-11-20`）在查询时归一化；目录里的精确键永远优先于归一化键。
+- **范围**：chat 类条目（无 `mode` 字段的条目保留）；数值须过合理性窗口（上下文 1,024–10,000,000 tokens，最大输出 128–10,000,000）。
+
+**改变什么**
+
+- 合并阶梯多了一层（在 live 提示与你的 overrides 之间）——可信的目录值压过网关的自报值（见[合并阶梯](#元数据合并阶梯低--高)）。
+- **离谱的 live 值被隔离**：live `context_length` 为 `0`、`100` 或 `10¹²` 不再污染元数据——合理性窗口先行拦截。
+- **可疑模式主动暴露**（由 `/live-models-test` 与 `/live-models-refresh` 呈现）：
+  - 网关上报的上下文与目录相差 ≥4×（双向都会标注）→ 告警并附现成的 `/live-models-fix <provider> <model> ctx=<目录值>` 命令；
+  - ≥3 个模型共享同一 live 上下文值 → 统一占位值告警（典型中转盖章）。
+
+不想要这些？一个字段：provider 条目上加 `"catalog": false`——不做目录查询、不出目录告警。（live 值的合理性窗口仍然生效：离谱的 `context_length` 无论如何都不会胜出。）
+
 ### 元数据合并阶梯（低 → 高）
 
-`entry.defaults` < 静态定义（`models.json` 条目 + `models-store.json` 缓存，按 id 匹配）< 端点提示（`context_length`、`context_window`、`max_model_len`、`max_completion_tokens`、`max_tokens`、OpenRouter `top_provider.*`）< `entry.overrides[id]`
+`entry.defaults` < 静态定义（`models.json` 条目 + `models-store.json` 缓存，按 id 匹配）< 端点提示（`context_length`、`context_window`、`max_model_len`、`max_completion_tokens`、`max_tokens`、OpenRouter `top_provider.*`）< 公共目录（精确匹配，[见上节](#公共元数据目录)）< `entry.overrides[id]`
+
+live 值必须先过合理性窗口才能赢得所在层：上下文整数 1,024–10,000,000 tokens，最大输出 128–10,000,000。被拒的 live 值直接落到下一层，不再向上传播。`/live-models-test` 的预览会标注每个字段值的胜出来源（`ctx=202800 (catalog)`、`max=… (live)`）。
 
 **cost** 遵循同一阶梯，由 `costFromLive` 调节：
 
@@ -172,6 +201,9 @@ pi install git:github.com/wait4xx/pi-live-models
 | `/live-models-reload` | 立即重读配置并重新注册（无需重启）。 |
 | `/live-models-test <provider>` | 干跑一次发现：逐模型 `kept by …` / `dropped by …` 标注 + 元数据预览（上下文窗口、价格、输入类型）。 |
 | `/live-models-refresh [ids...]` | 绕过 `refreshIntervalMs` 强制立即刷新（无参数 = 全部 provider）。更新内存目录与持久缓存；失败原样展示（手动动作不走缓存回落）。 |
+| `/live-models-catalog` | 查看公共目录状态：数据源 URL、缓存龄期、条目数、缓存路径。 |
+| `/live-models-catalog-refresh` | 强制阻塞式重拉公共元数据目录。 |
+| `/live-models-fix <provider> <model> ctx=<n> [max=<n>]` | 把元数据修正写进 `live-models.json` 的 `overrides`（原子写入，保留文件其余部分），然后 `/live-models-reload` 生效。写入前校验合理性窗口与该 provider 的已知模型 id。 |
 
 ## 离线缓存与故障行为
 
@@ -183,6 +215,7 @@ pi install git:github.com/wait4xx/pi-live-models
 | live 端点返回 0 模型 | 同上——`mergeStatic: "union"` 是补充不是兜底。 |
 | 调用方中止（list 模式、`/model` 中途关闭） | 原样重抛——不告警、不走缓存回落。 |
 | 手动 `/live-models-refresh` 失败 | 原样报错——手动动作绝不用缓存数据掩盖故障。 |
+| 公共目录拉取失败 | 发现流程照常（无目录参与）；30 分钟退避后自动后台重试，或用 `/live-models-catalog-refresh` 强制。 |
 
 ## 配方示例
 
@@ -242,10 +275,18 @@ pi install git:github.com/wait4xx/pi-live-models
 }
 ```
 
+**网关乱报上下文窗口**（所有模型都盖 `context_length: 128000`）：无需任何配置——公共目录自动纠正精确匹配的模型，`/live-models-test` 会标注不一致项。目录不认识的模型（或想自定值）用终端写一条覆盖：
+
+```
+/live-models-fix GLM glm-4.6 ctx=202800
+/live-models-reload
+```
+
 ## 安全说明
 
-- 扩展只对你**自己配置**的 URL 发 `GET` 请求；不内置任何端点，无遥测。
+- 扩展只对你**自己配置**的 URL 发 `GET` 请求，外加一次可选的公共目录读取（jsDelivr/raw.githubusercontent，无查询参数、无凭据）；不内置任何端点，无遥测。
 - 缓存文件只存模型元数据——绝不存凭据。
+- 公共目录数据由社区维护、仅精确匹配，可能有误或有缺失；overrides 永远优先。
 - 非法配置字段优雅降级（警告 + 忽略）；配置手误永远不会弄崩 pi 启动。
 
 ## 开发
@@ -253,7 +294,7 @@ pi install git:github.com/wait4xx/pi-live-models
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # node:test via tsx（42 个用例）
+npm test            # node:test via tsx（62 个用例）
 npm run smoke       # 对真实配置注册（不进 TUI）
 npx tsx scripts/smoke.ts GLM   # + GLM 真实刷新一轮
 ```
