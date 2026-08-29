@@ -15,7 +15,8 @@
  *   - credentials: /login stored key (context) -> entry apiKey spec ->
  *     models.json apiKey -> <PROVIDER>_API_KEY env; never logged;
  *   - metadata merge ladder: defaults < static (models.json/models-store.json)
- *     < live hints < overrides[id] — see discover.ts;
+ *     < live hints < public catalog (LiteLLM community data) < overrides[id]
+ *     — see discover.ts; gateway-reported windows pass a sanity check first;
  *   - network failure falls back to the persisted last-good cache (re-filtered
  *     with current rules); a filter-empty result is a config intent error and
  *     never silently serves stale models;
@@ -27,10 +28,36 @@
  *   /live-models-reload      re-read config and re-register immediately
  *   /live-models-test <id>   dry-run discovery with per-model keep/drop reasons
  *   /live-models-refresh [ids...] force an immediate refresh (bypasses throttling)
+ *   /live-models-catalog     public metadata catalog status
+ *   /live-models-catalog-refresh  force a catalog refetch
+ *   /live-models-fix <id> <model> ctx=<n> [max=<n>]
+ *                            write a metadata correction into overrides
  */
 import fs from "node:fs";
-import { cachePath, configPath, loadConfigFile, type LiveModelsConfig, type ProviderEntry } from "./config.ts";
+import {
+	applyFixToRawConfig,
+	cachePath,
+	catalogPath,
+	configPath,
+	loadConfigFile,
+	type LiveModelsConfig,
+	type ProviderEntry,
+} from "./config.ts";
 import { applyFilters, compileFilters, summarizeDrops, type CompiledFilters, type FilterOutcome } from "./filters.ts";
+import {
+	CONTEXT_WINDOW_MAX,
+	CONTEXT_WINDOW_MIN,
+	MAX_TOKENS_MAX,
+	MAX_TOKENS_MIN,
+	CATALOG_TTL_MS,
+	buildCatalogIndex,
+	createCatalogManager,
+	ensureCatalogSoft,
+	readCatalogCache,
+	refreshCatalogNow,
+	saneWindow,
+	type CatalogManager,
+} from "./catalog.ts";
 import { buildCatalog, buildModelsUrl, collectStaticById, resolveApiKey, type ModelDef, type RefreshContext } from "./discover.ts";
 
 /** Structural subset of pi's ExtensionAPI used by this extension. */
@@ -115,8 +142,9 @@ function modelsUrlOf(entry: ProviderEntry): string {
 /** One live discovery pass: fetch, filter, merge metadata, union static. Throws on any failure. */
 async function discoverOnce(
 	rt: ProviderRuntime,
+	state: ExtensionState,
 	context: RefreshContext | undefined,
-): Promise<{ models: ModelDef[]; outcomes: FilterOutcome[]; url: string; raw: unknown[]; staticCount: number }> {
+): Promise<{ models: ModelDef[]; outcomes: FilterOutcome[]; url: string; raw: unknown[]; staticCount: number; warnings: string[] }> {
 	const url = modelsUrlOf(rt.entry);
 	const key = context?.credential?.key ?? resolveApiKey(rt.id, rt.entry);
 	const headers: Record<string, string> = { ...(rt.entry.headers ?? {}) };
@@ -154,7 +182,17 @@ async function discoverOnce(
 				: [];
 
 	const staticById = collectStaticById(rt.id);
-	const { liveModels, outcomes, staticModels } = buildCatalog(items, { entry: rt.entry, filters: rt.filters, staticById });
+	// Public catalog enrichment: soft-ensure (disk load + background refresh,
+	// never blocking on the network), then exact-normalized lookup per model.
+	const catalogData = rt.entry.catalog !== false ? ensureCatalogSoft(state.cat) : null;
+	const catalogIndex = catalogData ? buildCatalogIndex(catalogData.models) : undefined;
+	const { liveModels, outcomes, staticModels, warnings } = buildCatalog(items, {
+		entry: rt.entry,
+		filters: rt.filters,
+		staticById,
+		providerId: rt.id,
+		catalog: catalogIndex,
+	});
 
 	// A zero-model LIVE result is a gateway/filter problem — static-only models
 	// from mergeStatic:"union" must never paper over it.
@@ -166,7 +204,7 @@ async function discoverOnce(
 		const drops = summary.drops.map((d) => `${d.reason} ×${d.count}`).join(", ");
 		throw new FilterEmptyError(`0 models survived filters from ${url} — dropped: ${drops} — keeping previous catalog`);
 	}
-	return { models: [...liveModels, ...staticModels], outcomes, url, raw: items, staticCount: staticModels.length };
+	return { models: [...liveModels, ...staticModels], outcomes, url, raw: items, staticCount: staticModels.length, warnings };
 }
 
 function makeRefreshModels(rt: ProviderRuntime, state: ExtensionState): (context: RefreshContext) => Promise<ModelDef[]> {
@@ -180,7 +218,7 @@ function makeRefreshModels(rt: ProviderRuntime, state: ExtensionState): (context
 			return rt.lastModels;
 		}
 		try {
-			const { models, outcomes, url, raw, staticCount } = await discoverOnce(rt, context);
+			const { models, outcomes, url, raw, staticCount } = await discoverOnce(rt, state, context);
 			rt.lastModels = models;
 			rt.lastSuccessAt = Date.now();
 			const summary = summarizeDrops(outcomes);
@@ -206,7 +244,7 @@ function makeRefreshModels(rt: ProviderRuntime, state: ExtensionState): (context
 			if (cached?.raw?.length) {
 				// v2 cache: rebuild through the full pipeline (field filters,
 				// merge ladder, union) from the raw items.
-				const { liveModels, staticModels } = buildCatalog(cached.raw, { entry: rt.entry, filters: rt.filters, staticById: collectStaticById(rt.id) });
+				const { liveModels, staticModels } = buildCatalog(cached.raw, { entry: rt.entry, filters: rt.filters, staticById: collectStaticById(rt.id), providerId: rt.id, catalog: rt.entry.catalog !== false && state.cat.data ? buildCatalogIndex(state.cat.data.models) : undefined });
 				if (liveModels.length) {
 					const models = [...liveModels, ...staticModels];
 					rt.lastModels = models;
@@ -235,6 +273,8 @@ interface ExtensionState {
 	runtimes: Map<string, ProviderRuntime>;
 	/** Single shared cache instance — re-read on /live-models-reload. */
 	cache: CacheFile;
+	/** Public metadata catalog — disk-backed, survives reloads (not swapped). */
+	cat: CatalogManager;
 }
 
 function buildState() {
@@ -295,7 +335,7 @@ function statusLine(rt: ProviderRuntime): string {
 }
 
 export default function liveModelsExtension(pi: ExtensionAPI): void {
-	const state: ExtensionState = { ...buildState(), cache: readCache() };
+	const state: ExtensionState = { ...buildState(), cache: readCache(), cat: createCatalogManager() };
 	registerAll(pi, state);
 
 	pi.registerCommand("live-models", {
@@ -313,11 +353,12 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("live-models-reload", {
 		description: "Reload live-models.json and re-register providers (takes effect immediately)",
 		handler: async (_args, ctx) => {
-			const next: ExtensionState = { ...buildState(), cache: readCache() };
+			const next: ExtensionState = { ...buildState(), cache: readCache(), cat: state.cat };
 			// Mutate the long-lived `state` in place BEFORE registering, so every
 			// closure (including ones from earlier reloads) keeps reading the
 			// same state object — passing `next` itself would strand prior
-			// generations on stale cache instances.
+			// generations on stale cache instances. `cat` is deliberately kept:
+			// the catalog manager is disk-backed and has no per-config lifetime.
 			state.config = next.config;
 			state.runtimes = next.runtimes;
 			state.cache = next.cache;
@@ -341,14 +382,14 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 			}
 			ctx.ui.notify(`${LOG} testing ${id} — ${modelsUrlOf(rt.entry)} ...`);
 			try {
-				const { models, outcomes, url, staticCount } = await discoverOnce(rt, undefined);
+				const { models, outcomes, url, staticCount, warnings } = await discoverOnce(rt, state, undefined);
 				const summary = summarizeDrops(outcomes);
 				const lines = outcomes.slice(0, TEST_LIST_LIMIT).map((outcome) => {
 					if (outcome.kept) return outcome.reason ? `  + ${outcome.id}  (kept by ${outcome.reason})` : `  + ${outcome.id}`;
 					return `  - ${outcome.id}  -> dropped by ${outcome.reason}`;
 				});
 				if (outcomes.length > TEST_LIST_LIMIT) lines.push(`  ... and ${outcomes.length - TEST_LIST_LIMIT} more`);
-				const preview = models.slice(0, 3).map((m) => `  ${m.id}: ctx=${m.contextWindow} max=${m.maxTokens} cost=${m.cost.input}/${m.cost.output} $/1M input=${m.input.join("+")}`);
+				const preview = models.slice(0, 3).map((m) => `  ${m.id}: ctx=${m.contextWindow} (${m.ctxSource ?? "?"}) max=${m.maxTokens} (${m.maxSource ?? "?"}) cost=${m.cost.input}/${m.cost.output} $/1M input=${m.input.join("+")}`);
 				ctx.ui.notify(
 					[
 						`${LOG} ${id} dry-run — ${url}`,
@@ -356,6 +397,7 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 						`summary: ${summary.raw} raw -> ${summary.kept} kept (${summary.raw - summary.kept} dropped)`,
 						...(staticCount > 0 ? [`+${staticCount} static-only model(s) added by mergeStatic=union`] : []),
 						...(preview.length ? ["metadata preview:", ...preview] : []),
+						...(warnings.length ? ["warnings:", ...warnings] : []),
 					].join("\n"),
 				);
 			} catch (err) {
@@ -381,12 +423,13 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 			const lines: string[] = [];
 			for (const rt of targets) {
 				try {
-					const { models, raw, url, staticCount } = await discoverOnce(rt, undefined);
+					const { models, raw, url, staticCount, warnings } = await discoverOnce(rt, state, undefined);
 					rt.lastModels = models;
 					rt.lastSuccessAt = Date.now();
 					rt.lastResult = { ok: true, at: new Date().toISOString(), detail: `${models.length} models${staticCount > 0 ? ` (+${staticCount} static-only)` : ""}` };
 					state.cache.providers[rt.id] = { at: rt.lastResult.at, url, raw };
 					lines.push(`  OK   ${rt.id}: ${rt.lastResult.detail}`);
+					for (const w of warnings) lines.push(`  ⚠    ${w}`);
 				} catch (err) {
 					const msg = err instanceof Error ? err.message : String(err);
 					rt.lastResult = { ok: false, at: new Date().toISOString(), detail: msg };
@@ -395,6 +438,119 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 			}
 			writeCache(state.cache);
 			ctx.ui.notify(`${LOG} forced refresh\n${lines.join("\n")}`);
+		},
+	});
+
+	pi.registerCommand("live-models-catalog", {
+		description: "Show public metadata catalog status (source, cache age, entries)",
+		handler: (_args, ctx) => {
+			const data = state.cat.data ?? readCatalogCache();
+			if (!data) {
+				ctx.ui.notify(`${LOG} catalog: not loaded yet — fetched in the background on first discovery.\nRun /live-models-catalog-refresh to fetch it now.`);
+				return;
+			}
+			const ageH = Math.round((Date.now() - data.fetchedAt) / 3_600_000);
+			ctx.ui.notify(
+				[
+					`${LOG} catalog`,
+					`  source: ${data.url}`,
+					`  fetched: ${new Date(data.fetchedAt).toISOString()} (${ageH < 1 ? "<1h" : `${ageH}h`} ago)`,
+					`  entries: ${Object.keys(data.models).length} models`,
+					`  cache: ${catalogPath()}`,
+					`  refreshed in the background every ${Math.round(CATALOG_TTL_MS / 86_400_000)}d`,
+				].join("\n"),
+			);
+		},
+	});
+
+	pi.registerCommand("live-models-catalog-refresh", {
+		description: "Force a refetch of the public metadata catalog",
+		handler: async (_args, ctx) => {
+			ctx.ui.notify(`${LOG} refreshing catalog ...`);
+			try {
+				const data = await refreshCatalogNow(state.cat);
+				ctx.ui.notify(`${LOG} catalog refreshed\n  source: ${data.url}\n  entries: ${Object.keys(data.models).length} models\n  cache: ${catalogPath()}`);
+			} catch (err) {
+				ctx.ui.notify(`${LOG} catalog refresh failed: ${err instanceof Error ? err.message : err}`);
+			}
+		},
+	});
+
+	pi.registerCommand("live-models-fix", {
+		description: "Write a metadata correction into overrides: /live-models-fix <provider> <model> ctx=<n> [max=<n>]",
+		handler: (args, ctx) => {
+			const tokens = args.trim().split(/\s+/).filter(Boolean);
+			const [providerId, modelId, ...kvArgs] = tokens;
+			if (!providerId || !modelId || !kvArgs.length) {
+				ctx.ui.notify(`Usage: /live-models-fix <provider> <model> ctx=<n> [max=<n>]\nExample: /live-models-fix GLM glm-4.6 ctx=200000\nConfigured: ${[...state.runtimes.keys()].join(", ") || "(none)"}`);
+				return;
+			}
+			if (!state.runtimes.has(providerId)) {
+				ctx.ui.notify(`${LOG} provider "${providerId}" is not configured.\nConfigured: ${[...state.runtimes.keys()].join(", ") || "(none)"}`);
+				return;
+			}
+			const patch: { contextWindow?: number; maxTokens?: number } = {};
+			for (const kv of kvArgs) {
+				const match = /^(ctx|max)=(\d+)$/.exec(kv);
+				if (!match) {
+					ctx.ui.notify(`${LOG} bad argument "${kv}" — expected ctx=<n> or max=<n> (positive integers)`);
+					return;
+				}
+				const value = Number(match[2]);
+				if (match[1] === "ctx") {
+					if (!saneWindow(value, CONTEXT_WINDOW_MIN, CONTEXT_WINDOW_MAX)) {
+						ctx.ui.notify(`${LOG} ctx must be an integer in [${CONTEXT_WINDOW_MIN}, ${CONTEXT_WINDOW_MAX}]`);
+						return;
+					}
+					patch.contextWindow = value;
+				} else {
+					if (!saneWindow(value, MAX_TOKENS_MIN, MAX_TOKENS_MAX)) {
+						ctx.ui.notify(`${LOG} max must be an integer in [${MAX_TOKENS_MIN}, ${MAX_TOKENS_MAX}]`);
+						return;
+					}
+					patch.maxTokens = value;
+				}
+			}
+			// The model must be known to this provider (last live list or cache) —
+			// unless nothing has been discovered yet, in which case trust the user.
+			const known = new Set((state.runtimes.get(providerId)!.lastModels ?? []).map((m) => m.id));
+			for (const item of state.cache.providers[providerId]?.raw ?? []) {
+				const id = item && typeof item === "object" ? (item as { id?: unknown }).id : undefined;
+				if (typeof id === "string") known.add(id);
+			}
+			if (known.size > 0 && !known.has(modelId)) {
+				ctx.ui.notify(`${LOG} model "${modelId}" is not in ${providerId}'s list — run /live-models-test ${providerId} to see the ids.`);
+				return;
+			}
+			let raw: unknown;
+			try {
+				raw = JSON.parse(fs.readFileSync(configPath(), "utf8"));
+			} catch (err) {
+				ctx.ui.notify(`${LOG} cannot read ${configPath()}: ${err instanceof Error ? err.message : err}`);
+				return;
+			}
+			const result = applyFixToRawConfig(raw, providerId, modelId, patch);
+			if (!result.ok) {
+				ctx.ui.notify(`${LOG} ${result.error}`);
+				return;
+			}
+			try {
+				const tmp = `${configPath()}.tmp`;
+				fs.writeFileSync(tmp, JSON.stringify(raw, null, 2), "utf8");
+				fs.renameSync(tmp, configPath());
+			} catch (err) {
+				try {
+					fs.rmSync(`${configPath()}.tmp`, { force: true });
+				} catch {
+					/* best effort */
+				}
+				ctx.ui.notify(`${LOG} failed to write ${configPath()}: ${err instanceof Error ? err.message : err}`);
+				return;
+			}
+			const parts: string[] = [];
+			if (patch.contextWindow !== undefined) parts.push(`contextWindow=${patch.contextWindow}`);
+			if (patch.maxTokens !== undefined) parts.push(`maxTokens=${patch.maxTokens}`);
+			ctx.ui.notify(`${LOG} wrote ${providerId}.overrides.${modelId} (${parts.join(", ")})\nRun /live-models-reload to apply.`);
 		},
 	});
 }

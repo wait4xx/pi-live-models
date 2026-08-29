@@ -135,17 +135,17 @@ test("buildCatalog: filters live items, merges metadata, union adds filtered sta
 	const staticById = {
 		"ghost-1": { contextWindow: 9999 },
 		"bad-ghost": {},
-		"live-1": { contextWindow: 1 }, // also static — must not duplicate
+		"live-1": { contextWindow: 4096 }, // also static — must not duplicate
 	};
 	const items = [
-		{ id: "live-1", context_length: 100 },
+		{ id: "live-1", context_length: 8192 },
 		{ id: "bad-live" },
 		{ name: "unnamed" }, // id via name fallback
 	];
 	const result = buildCatalog(items, { entry, filters, staticById });
 	assert.deepEqual(result.liveModels.map((m) => m.id), ["live-1", "unnamed"]);
 	assert.deepEqual(result.staticModels.map((m) => m.id), ["ghost-1"]); // bad-ghost filtered, live-1 not duplicated
-	assert.equal(result.liveModels[0].contextWindow, 100); // live hint beats static
+	assert.equal(result.liveModels[0].contextWindow, 8192); // live hint beats static
 	assert.equal(result.staticModels[0].contextWindow, 9999);
 	assert.equal(result.outcomes.length, 3);
 
@@ -158,13 +158,13 @@ test("buildCatalog: duplicate live ids (gateway alias) yield one entry, first wi
 	const filters = compileFilters("T.filters", undefined, undefined);
 	const result = buildCatalog(
 		[
-			{ id: "m-1", context_length: 100 },
-			{ id: "m-1", context_length: 200 },
+			{ id: "m-1", context_length: 8192 },
+			{ id: "m-1", context_length: 16384 },
 		],
 		{ entry: { baseUrl: "https://x.example" } as ProviderEntry, filters, staticById: {} },
 	);
 	assert.equal(result.liveModels.length, 1);
-	assert.equal(result.liveModels[0].contextWindow, 100);
+	assert.equal(result.liveModels[0].contextWindow, 8192);
 	assert.equal(result.outcomes.length, 1);
 });
 

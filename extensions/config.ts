@@ -75,6 +75,8 @@ export interface ProviderEntry {
 	overrides?: Record<string, ModelOverride>;
 	/** Live pricing fill strategy. Default "fill-zero": use live pricing only when no other source (override/static/defaults) defines cost. */
 	costFromLive?: CostFromLive;
+	/** Enrich metadata from the public catalog (LiteLLM community data) for well-known models. Default true. */
+	catalog?: boolean;
 	/** "live" (default): only live-listed models, static defs only enrich metadata. "union": also register static-only models. */
 	mergeStatic?: MergeStatic;
 }
@@ -103,6 +105,10 @@ export function configPath(): string {
 
 export function cachePath(): string {
 	return path.join(agentDir(), "live-models-cache.json");
+}
+
+export function catalogPath(): string {
+	return path.join(agentDir(), "live-models-catalog.json");
 }
 
 export function modelsJsonPath(): string {
@@ -365,6 +371,10 @@ export function parseConfig(
 			if (value === "live" || value === "union") entry.mergeStatic = value;
 			else issues.push({ provider: id, field: "mergeStatic", message: `providers.${id}.mergeStatic must be "live" or "union" — ignored (default live)` });
 		}
+		if (entryRaw.catalog !== undefined) {
+			if (typeof entryRaw.catalog === "boolean") entry.catalog = entryRaw.catalog;
+			else issues.push({ provider: id, field: "catalog", message: `providers.${id}.catalog must be a boolean — ignored (default true)` });
+		}
 
 		// filters (presets resolved and flattened here)
 		if (entryRaw.filters !== undefined) {
@@ -386,6 +396,44 @@ export function parseConfig(
 	}
 
 	return { config, issues, skipped };
+}
+
+export interface FixPatch {
+	contextWindow?: number;
+	maxTokens?: number;
+}
+
+/**
+ * Apply an override patch to the RAW config object (as JSON.parse'd from
+ * live-models.json), preserving every other field and the original key order.
+ * Mutates `raw` in place; the caller persists it. Never throws.
+ */
+export function applyFixToRawConfig(
+	raw: unknown,
+	providerId: string,
+	modelId: string,
+	patch: FixPatch,
+): { ok: boolean; error?: string } {
+	if (!isPlainObject(raw)) return { ok: false, error: "config root is not an object" };
+	// Reject prototype-reserved ids: obj["__proto__"] hits the inherited
+	// getter (not an own property), which would let a fix write into
+	// Object.prototype and "succeed" without changing the file.
+	const reserved = new Set(["__proto__", "constructor", "prototype"]);
+	if (reserved.has(providerId) || reserved.has(modelId)) {
+		return { ok: false, error: `"${reserved.has(providerId) ? providerId : modelId}" is not a valid id` };
+	}
+	const providers = raw.providers;
+	if (!isPlainObject(providers) || !isPlainObject(providers[providerId])) {
+		return { ok: false, error: `provider "${providerId}" not found in config` };
+	}
+	const entry = providers[providerId] as Record<string, unknown>;
+	if (!isPlainObject(entry.overrides)) entry.overrides = {};
+	const overrides = entry.overrides as Record<string, unknown>;
+	if (!isPlainObject(overrides[modelId])) overrides[modelId] = {};
+	const model = overrides[modelId] as Record<string, unknown>;
+	if (patch.contextWindow !== undefined) model.contextWindow = patch.contextWindow;
+	if (patch.maxTokens !== undefined) model.maxTokens = patch.maxTokens;
+	return { ok: true };
 }
 
 /**
