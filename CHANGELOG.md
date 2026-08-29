@@ -18,6 +18,7 @@ Initial release.
 - Offline cache (`~/.pi/agent/live-models-cache.json`): last good list per provider is persisted and re-filtered with current rules on network failure, so a gateway outage never empties the catalog after a restart.
 - Per-entry `timeoutMs` (default 10 s) and optional `refreshIntervalMs` throttling (default 0 = refresh on every `/model` open).
 - Strict config validation with field-precise warnings; invalid fields degrade gracefully, only entries without a usable `baseUrl` are skipped.
+- Caller-aborted refreshes (list mode, `/model` closed mid-flight) are rethrown as-is — no warnings, no cache fallback — instead of masquerading as provider failures.
 - Zero runtime dependencies; TypeScript; unit tests (`node:test` via tsx) and CI matrix (Windows + Ubuntu).
 
 ### Migration

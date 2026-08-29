@@ -201,7 +201,7 @@ function makeRefreshModels(rt: ProviderRuntime, cache: CacheFile): (context: Ref
 				const models = cached.models.filter((m) => applyFilters(m.id, rt.filters).kept);
 				if (models.length) {
 					rt.lastModels = models;
-				rt.lastResult = { ok: true, at: new Date().toISOString(), detail: `serving cached ${models.length} models from ${cached.at} (${message})` };
+					rt.lastResult = { ok: true, at: new Date().toISOString(), detail: `serving cached ${models.length} models from ${cached.at} (${message})` };
 					console.warn(`${LOG} ${rt.id}: ${message} -> serving cached ${models.length} models from ${cached.at}`);
 					return models;
 				}
