@@ -107,3 +107,75 @@ test("loadConfigFile: missing file -> empty config; broken JSON -> issue; valid 
 		fs.rmSync(tmp, { recursive: true, force: true });
 	}
 });
+
+test("presets: use flattens preset lists into entry filters (union), use field dropped", () => {
+	const { config, issues } = parseConfig({
+		presets: { "no-legacy": { excludeRegex: ["^glm-4\\."] } },
+		providers: {
+			GLM: { baseUrl: "https://x.example", filters: { use: ["no-legacy"], include: ["*glm*"] } },
+		},
+	});
+	assert.deepEqual(issues, []);
+	assert.deepEqual(config.presets?.["no-legacy"]?.excludeRegex, ["^glm-4\\."]);
+	assert.deepEqual(config.providers.GLM.filters?.include, ["*glm*"]);
+	assert.deepEqual(config.providers.GLM.filters?.excludeRegex, ["^glm-4\\."]);
+	assert.equal(config.providers.GLM.filters?.use, undefined); // flattened away
+});
+
+test("presets: unknown preset warns and is ignored; valid siblings still apply", () => {
+	const { config, issues } = parseConfig({
+		presets: { good: { exclude: ["x*"] } },
+		providers: { A: { baseUrl: "https://x.example", filters: { use: ["good", "missing"], includeRegex: ["^m"] } } },
+	});
+	assert.ok(issues.some((i) => i.field === "providers.A.filters.use" && i.message.includes('"missing"')));
+	assert.deepEqual(config.providers.A.filters?.exclude, ["x*"]);
+	assert.deepEqual(config.providers.A.filters?.includeRegex, ["^m"]);
+});
+
+test("presets: presets cannot reference presets", () => {
+	const { issues } = parseConfig({
+		presets: { chained: { use: ["other"] } },
+		providers: { A: { baseUrl: "https://x.example" } },
+	});
+	assert.ok(issues.some((i) => i.field === "presets.chained.use"));
+});
+
+test("defaultFilters: preset contributions limited to blacklists; direct include fields rejected", () => {
+	const { config, issues } = parseConfig({
+		presets: { mixed: { exclude: ["a*"], include: ["b*"] } },
+		defaultFilters: { use: ["mixed"], include: ["c*"] },
+		providers: { A: { baseUrl: "https://x.example" } },
+	});
+	// direct include rejected outright
+	assert.ok(issues.some((i) => i.field === "defaultFilters.include"));
+	// preset include contribution warned + ignored, exclude kept
+	assert.ok(issues.some((i) => i.field === "defaultFilters.use" && i.message.includes("include")));
+	assert.deepEqual(config.defaultFilters?.exclude, ["a*"]);
+	assert.equal((config.defaultFilters as Record<string, unknown>)?.include, undefined);
+});
+
+test("includeBy/excludeBy validated as field -> string[] maps, bad shapes degrade", () => {
+	const { config, issues } = parseConfig({
+		providers: {
+			A: { baseUrl: "https://x.example", filters: { includeBy: { owned_by: ["openai"] }, excludeBy: { owned_by: 5 } } },
+		},
+	});
+	assert.deepEqual(config.providers.A.filters?.includeBy, { owned_by: ["openai"] });
+	assert.equal(config.providers.A.filters?.excludeBy, undefined);
+	assert.ok(issues.some((i) => i.field === "providers.A.filters.excludeBy"));
+});
+
+test("costFromLive / mergeStatic enum validation with graceful degradation", () => {
+	const { config, issues } = parseConfig({
+		providers: {
+			A: { baseUrl: "https://x.example", costFromLive: "always", mergeStatic: "union" },
+			B: { baseUrl: "https://x.example", costFromLive: "sometimes", mergeStatic: "merge" },
+		},
+	});
+	assert.equal(config.providers.A.costFromLive, "always");
+	assert.equal(config.providers.A.mergeStatic, "union");
+	assert.equal(config.providers.B.costFromLive, undefined);
+	assert.equal(config.providers.B.mergeStatic, undefined);
+	assert.ok(issues.some((i) => i.provider === "B" && i.field === "costFromLive"));
+	assert.ok(issues.some((i) => i.provider === "B" && i.field === "mergeStatic"));
+});

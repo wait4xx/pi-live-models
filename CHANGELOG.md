@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.0] - 2026-08-29
+
+Filter presets, field-level filtering, live pricing, static union, and a forced-refresh command.
+
+### Added
+
+- **Filter presets** — top-level `presets` map + `filters.use` / `defaultFilters.use`: reusable named filter specs, unioned field-by-field during parsing. Presets cannot reference presets (warned + ignored). `defaultFilters` accepts blacklist contributions only — include-style fields written directly or contributed by a preset are warned + ignored, so a global default can never create a whitelist.
+- **Field-level filtering** — `filters.includeBy` / `filters.excludeBy`: case-insensitive globs keyed by dotted paths into the live `/v1/models` item (e.g. `owned_by`, `architecture.input_modalities`). Exclude rules OR; include rules AND with each other and with id includes; missing fields / non-string values never match excludes and always fail includes (`includeBy-miss:<field>` drop reason). String globs only in v0.2 — no numeric ranges. `defaultFilters.excludeBy` joins the global blacklist union.
+- **Live pricing → cost** (`costFromLive`) — OpenRouter-style `pricing.prompt` / `pricing.completion` / `pricing.prompt_cache_read` ($/token strings) are converted to $/1M and fill `cost`. `"fill-zero"` (default) fills only when no other source (override/static/defaults) defines cost; `"always"` lets live pricing beat static/defaults (overrides still win); `"off"` ignores it. Explicit `"0"` (free tier) is a valid live cost. `/live-models-test` preview now shows cost.
+- **`mergeStatic: "union"`** — also register models that exist in `models.json`/`models-store.json` but are missing from the gateway's live list (same filters apply, static def acts as the field source for `*By` rules). A zero-model live result still throws — union supplements, never papers over a broken gateway. Status shows `+N static-only`.
+- **`/live-models-refresh [ids...]`** — force an immediate refresh bypassing `refreshIntervalMs` (no argument = all providers). Success updates the in-memory catalog and persisted cache; failures are reported verbatim without cache fallback.
+
+### Changed
+
+- Offline cache format v2: entries now persist the **raw endpoint items** so the fallback path rebuilds through the full pipeline (field filters, merge ladder, union) with current rules, instead of re-filtering merged defs by id only. v1 caches remain readable (best-effort id-only re-filter) and are upgraded on the next successful refresh.
+- Single shared cache instance across the extension lifetime (fixes a potential lost-update between `/live-models-reload` and background refreshes).
+- `buildCatalog()` extracted as a pure function (live discovery, cache rebuild, and tests share one pipeline).
+
 ## [0.1.0] - 2026-08-29
 
 Initial release.

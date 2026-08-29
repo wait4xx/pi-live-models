@@ -36,13 +36,27 @@ export interface FiltersSpec {
 	includeRegex?: string[];
 	/** Regex blacklist on model id, case-sensitive. Always wins over include. */
 	excludeRegex?: string[];
+	/** Field-level glob whitelist keyed by dotted path into the live item, e.g. `{ "architecture.input_modalities": ["*text*"] }`. Every key must match (AND); missing field = drop. Globs are case-insensitive. */
+	includeBy?: Record<string, string[]>;
+	/** Field-level glob blacklist, same syntax. Any hit drops the model (OR). Wins over all include rules. */
+	excludeBy?: Record<string, string[]>;
+	/** Preset names (top-level `presets`) unioned into this spec. Flattened during parsing; raw configs only. */
+	use?: string[];
 }
 
 /** Top-level global filters. Only blacklists are supported here (unioned with per-entry excludes). */
 export interface DefaultFilters {
 	exclude?: string[];
 	excludeRegex?: string[];
+	excludeBy?: Record<string, string[]>;
+	use?: string[];
 }
+
+/** How live pricing hints (OpenRouter-style `pricing.*`, $/token) fill model cost. */
+export type CostFromLive = "fill-zero" | "always" | "off";
+
+/** Static catalog participation in the model list. */
+export type MergeStatic = "live" | "union";
 
 export interface ProviderEntry {
 	name?: string;
@@ -59,9 +73,15 @@ export interface ProviderEntry {
 	filters?: FiltersSpec;
 	defaults?: ModelDefaults;
 	overrides?: Record<string, ModelOverride>;
+	/** Live pricing fill strategy. Default "fill-zero": use live pricing only when no other source (override/static/defaults) defines cost. */
+	costFromLive?: CostFromLive;
+	/** "live" (default): only live-listed models, static defs only enrich metadata. "union": also register static-only models. */
+	mergeStatic?: MergeStatic;
 }
 
 export interface LiveModelsConfig {
+	/** Named reusable filter presets, referenced via `filters.use` / `defaultFilters.use`. */
+	presets?: Record<string, FiltersSpec>;
 	defaultFilters?: DefaultFilters;
 	providers: Record<string, ProviderEntry>;
 }
@@ -118,6 +138,116 @@ function optionalPositiveNumber(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
+function stringArrayRecord(value: unknown): Record<string, string[]> | null {
+	if (!isPlainObject(value)) return null;
+	for (const v of Object.values(value)) {
+		if (!Array.isArray(v) || !v.every((item) => typeof item === "string")) return null;
+	}
+	return value as Record<string, string[]>;
+}
+
+const LIST_FIELDS = ["include", "exclude", "includeRegex", "excludeRegex"] as const;
+const BY_FIELDS = ["includeBy", "excludeBy"] as const;
+const INCLUDE_FIELDS = ["include", "includeRegex", "includeBy"] as const;
+
+/**
+ * Parse + flatten one filter spec object (a preset body, defaultFilters, or a
+ * provider's filters). `use` references are resolved against `presets` and
+ * unioned field by field. In `blacklistOnly` mode include-style fields are
+ * rejected — both written directly and contributed by presets — so a global
+ * default can never create a whitelist.
+ */
+function parseFilterSpec(
+	raw: unknown,
+	where: string,
+	issues: ConfigIssue[],
+	presets: Record<string, FiltersSpec>,
+	options: { allowUse: boolean; blacklistOnly?: boolean; provider?: string },
+): FiltersSpec | undefined {
+	if (!isPlainObject(raw)) {
+		issues.push({ provider: options.provider, field: where, message: `${where} must be an object — ignored` });
+		return undefined;
+	}
+	const spec: FiltersSpec = {};
+	let any = false;
+
+	const mergeLists = (source: FiltersSpec, label: string): void => {
+		for (const field of LIST_FIELDS) {
+			if (!source[field]?.length) continue;
+			if (options.blacklistOnly && (INCLUDE_FIELDS as readonly string[]).includes(field)) {
+				issues.push({ provider: options.provider, field: `${where}.use`, message: `preset "${label}" contributes ${field}() to ${where} — only blacklists apply here, include ignored` });
+				continue;
+			}
+			spec[field] = [...(spec[field] ?? []), ...source[field]!];
+			any = true;
+		}
+		for (const field of BY_FIELDS) {
+			if (!source[field]) continue;
+			if (options.blacklistOnly && (INCLUDE_FIELDS as readonly string[]).includes(field)) {
+				issues.push({ provider: options.provider, field: `${where}.use`, message: `preset "${label}" contributes ${field} to ${where} — only blacklists apply here, include ignored` });
+				continue;
+			}
+			const target: Record<string, string[]> = { ...(spec[field] ?? {}) };
+			for (const [key, list] of Object.entries(source[field]!)) {
+				target[key] = [...(target[key] ?? []), ...list];
+			}
+			spec[field] = target;
+			any = true;
+		}
+	};
+
+	for (const field of LIST_FIELDS) {
+		const value = raw[field];
+		if (value === undefined) continue;
+		if (options.blacklistOnly && (INCLUDE_FIELDS as readonly string[]).includes(field)) {
+			issues.push({ provider: options.provider, field: `${where}.${field}`, message: `${where}.${field} is not allowed here (global blacklists only) — ignored` });
+			continue;
+		}
+		const list = stringArray(value);
+		if (!list) {
+			issues.push({ provider: options.provider, field: `${where}.${field}`, message: `${where}.${field} must be an array of strings — field ignored` });
+			continue;
+		}
+		spec[field] = list;
+		any = true;
+	}
+	for (const field of BY_FIELDS) {
+		const value = raw[field];
+		if (value === undefined) continue;
+		if (options.blacklistOnly && (INCLUDE_FIELDS as readonly string[]).includes(field)) {
+			issues.push({ provider: options.provider, field: `${where}.${field}`, message: `${where}.${field} is not allowed here (global blacklists only) — ignored` });
+			continue;
+		}
+		const map = stringArrayRecord(value);
+		if (!map) {
+			issues.push({ provider: options.provider, field: `${where}.${field}`, message: `${where}.${field} must be an object of field -> array of strings — field ignored` });
+			continue;
+		}
+		spec[field] = map;
+		any = true;
+	}
+
+	if (raw.use !== undefined) {
+		const useList = stringArray(raw.use);
+		if (!options.allowUse) {
+			issues.push({ provider: options.provider, field: `${where}.use`, message: `${where}.use is not allowed here (presets cannot reference presets) — ignored` });
+		} else if (!useList) {
+			issues.push({ provider: options.provider, field: `${where}.use`, message: `${where}.use must be an array of strings — ignored` });
+		} else {
+			for (const name of useList) {
+				const preset = presets[name];
+				if (!preset) {
+					issues.push({ provider: options.provider, field: `${where}.use`, message: `${where}.use references unknown preset "${name}" — ignored` });
+					continue;
+				}
+				mergeLists(preset, name);
+			}
+		}
+	}
+
+	return any ? spec : undefined;
+}
+
 function isHttpUrl(value: string): boolean {
 	try {
 		const parsed = new URL(value);
@@ -146,25 +276,25 @@ export function parseConfig(
 		return { config, issues, skipped };
 	}
 
+	// --- global presets (parsed first so defaultFilters/providers can reference them) ---
+	const presets: Record<string, FiltersSpec> = {};
+	if (raw.presets !== undefined) {
+		const rawPresets = raw.presets;
+		if (!isPlainObject(rawPresets)) {
+			issues.push({ field: "presets", message: "presets must be an object mapping name -> filter spec — ignored" });
+		} else {
+			for (const [name, body] of Object.entries(rawPresets)) {
+				const spec = parseFilterSpec(body, `presets.${name}`, issues, {}, { allowUse: false });
+				if (spec) presets[name] = spec;
+			}
+			if (Object.keys(presets).length) config.presets = presets;
+		}
+	}
+
 	// --- global defaultFilters (blacklist union only) ---
 	if (raw.defaultFilters !== undefined) {
-		const df = raw.defaultFilters;
-		const parsed: DefaultFilters = {};
-		if (!isPlainObject(df)) {
-			issues.push({ field: "defaultFilters", message: "defaultFilters must be an object" });
-		} else {
-			if (df.exclude !== undefined) {
-				const exclude = stringArray(df.exclude);
-				if (!exclude) issues.push({ field: "defaultFilters.exclude", message: "must be an array of strings" });
-				else parsed.exclude = exclude;
-			}
-			if (df.excludeRegex !== undefined) {
-				const excludeRegex = stringArray(df.excludeRegex);
-				if (!excludeRegex) issues.push({ field: "defaultFilters.excludeRegex", message: "must be an array of strings" });
-				else parsed.excludeRegex = excludeRegex;
-			}
-		}
-		if (parsed.exclude || parsed.excludeRegex) config.defaultFilters = parsed;
+		const parsed = parseFilterSpec(raw.defaultFilters, "defaultFilters", issues, presets, { allowUse: true, blacklistOnly: true });
+		if (parsed) config.defaultFilters = parsed;
 	}
 
 	// --- providers ---
@@ -224,27 +354,22 @@ export function parseConfig(
 			else entry.refreshIntervalMs = refreshIntervalMs;
 		}
 
-		// filters
+		// enum knobs
+		if (entryRaw.costFromLive !== undefined) {
+			const value = entryRaw.costFromLive;
+			if (value === "fill-zero" || value === "always" || value === "off") entry.costFromLive = value;
+			else issues.push({ provider: id, field: "costFromLive", message: `providers.${id}.costFromLive must be one of "fill-zero" | "always" | "off" — ignored (default fill-zero)` });
+		}
+		if (entryRaw.mergeStatic !== undefined) {
+			const value = entryRaw.mergeStatic;
+			if (value === "live" || value === "union") entry.mergeStatic = value;
+			else issues.push({ provider: id, field: "mergeStatic", message: `providers.${id}.mergeStatic must be "live" or "union" — ignored (default live)` });
+		}
+
+		// filters (presets resolved and flattened here)
 		if (entryRaw.filters !== undefined) {
-			const filtersRaw = entryRaw.filters;
-			if (!isPlainObject(filtersRaw)) {
-				issues.push({ provider: id, field: "filters", message: `providers.${id}.filters must be an object — ignored (no filtering)` });
-			} else {
-				const filters: FiltersSpec = {};
-				let any = false;
-				for (const field of ["include", "exclude", "includeRegex", "excludeRegex"] as const) {
-					const value = filtersRaw[field];
-					if (value === undefined) continue;
-					const list = stringArray(value);
-					if (!list) {
-						issues.push({ provider: id, field: `filters.${field}`, message: `providers.${id}.filters.${field} must be an array of strings — field ignored` });
-						continue;
-					}
-					filters[field] = list;
-					any = true;
-				}
-				if (any) entry.filters = filters;
-			}
+			const filters = parseFilterSpec(entryRaw.filters, `providers.${id}.filters`, issues, presets, { allowUse: true, provider: id });
+			if (filters) entry.filters = filters;
 		}
 
 		// compat / defaults / overrides: passed through as opaque objects

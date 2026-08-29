@@ -78,3 +78,52 @@ test("summarizeDrops aggregates counts, biggest first", () => {
 	assert.equal(summary.kept, 3);
 	assert.deepEqual(summary.drops, [{ reason: "exclude:*audio*", count: 2 }]);
 });
+
+test("excludeBy drops models whose field value matches a glob (case-insensitive)", () => {
+	const f = compile({ excludeBy: { owned_by: ["system", "*-internal"] } });
+	assert.equal(applyFilters("m-1", f, { owned_by: "system" }).kept, false);
+	assert.equal(applyFilters("m-1", f, { owned_by: "X-INTERNAL" }).reason, "excludeBy:owned_by:*-internal");
+	assert.equal(applyFilters("m-1", f, { owned_by: "openai" }).kept, true);
+	assert.equal(applyFilters("m-1", f, {}).kept, true); // field missing -> cannot match
+	assert.equal(applyFilters("m-1", f).kept, true); // no item at all -> cannot match
+});
+
+test("excludeBy walks dotted paths; array values match when any element hits", () => {
+	const f = compile({ excludeBy: { "architecture.input_modalities": ["*image*"] } });
+	assert.equal(applyFilters("m-1", f, { architecture: { input_modalities: ["text", "image"] } }).kept, false);
+	assert.equal(applyFilters("m-1", f, { architecture: { input_modalities: ["text"] } }).kept, true);
+	assert.equal(applyFilters("m-1", f, { architecture: {} }).kept, true);
+	// non-string values never match
+	assert.equal(applyFilters("m-1", f, { architecture: { input_modalities: [42, null] } }).kept, true);
+});
+
+test("includeBy requires every field to hit (AND); misses get a field-precise reason", () => {
+	const f = compile({ includeBy: { owned_by: ["openai"], "architecture.input_modalities": ["text*"] } });
+	assert.equal(applyFilters("m-1", f, { owned_by: "openai", architecture: { input_modalities: ["text"] } }).kept, true);
+	const missField = applyFilters("m-1", f, { owned_by: "openai" }); // second field missing
+	assert.equal(missField.kept, false);
+	assert.equal(missField.reason, "includeBy-miss:architecture.input_modalities");
+	assert.equal(applyFilters("m-1", f, { owned_by: "anthropic", architecture: { input_modalities: ["text"] } }).reason, "includeBy-miss:owned_by");
+});
+
+test("includeBy alone is whitelist mode; includeBy AND id-include combine", () => {
+	const f = compile({ includeBy: { owned_by: ["openai"] } });
+	assert.equal(f.hasWhitelist, true);
+	assert.equal(f.hasIdInclude, false);
+	assert.equal(applyFilters("m-1", f, { owned_by: 42 }).kept, false); // non-string never matches
+
+	const g = compile({ include: ["gpt-*"], includeBy: { owned_by: ["openai"] } });
+	const both = applyFilters("gpt-4o", g, { owned_by: "openai" });
+	assert.equal(both.kept, true);
+	assert.equal(both.reason, "include:gpt-*");
+	assert.equal(applyFilters("gpt-4o", g, { owned_by: "system" }).reason, "includeBy-miss:owned_by");
+	assert.equal(applyFilters("claude-3", g, { owned_by: "openai" }).reason, "whitelist-miss");
+});
+
+test("exclude always wins over field rules too", () => {
+	const f = compile({ includeBy: { owned_by: ["openai"] }, exclude: ["secret-*"] });
+	assert.equal(applyFilters("secret-1", f, { owned_by: "openai" }).kept, false);
+	const g = compile({ include: ["m-*"], excludeBy: { owned_by: ["system"] } });
+	assert.equal(applyFilters("m-1", g, { owned_by: "system" }).kept, false);
+	assert.equal(applyFilters("m-1", g, { owned_by: "openai" }).reason, "include:m-*");
+});

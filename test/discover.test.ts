@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildModelsUrl, buildModel, envKeyVarName, liveNumber, resolveKeySpec } from "../extensions/discover.ts";
+import { buildCatalog, buildModelsUrl, buildModel, envKeyVarName, liveCostFrom, liveNumber, resolveKeySpec } from "../extensions/discover.ts";
+import { compileFilters } from "../extensions/filters.ts";
+import type { ProviderEntry } from "../extensions/config.ts";
 
 test("buildModelsUrl derives the endpoint for common base URL shapes", () => {
 	assert.equal(buildModelsUrl("https://x.example"), "https://x.example/v1/models");
@@ -86,4 +88,80 @@ test("buildModel applies provider-level compat/api as fallback, override wins", 
 
 	const staticWins = buildModel("m-0", undefined, entry, { compat: { thinkingFormat: "static" } });
 	assert.deepEqual(staticWins.compat, { thinkingFormat: "static" });
+});
+
+test("liveCostFrom extracts OpenRouter-style $/token strings into $/1M numbers", () => {
+	const item = { pricing: { prompt: "0.0000015", completion: "0.00000225", prompt_cache_read: "0.0000002" } };
+	const cost = liveCostFrom(item)!;
+	assert.ok(Math.abs(cost.input - 1.5) < 1e-9);
+	assert.ok(Math.abs(cost.output - 2.25) < 1e-9);
+	assert.ok(Math.abs(cost.cacheRead - 0.2) < 1e-9);
+	// explicit free tier is a valid live cost
+	assert.deepEqual(liveCostFrom({ pricing: { prompt: "0" } }), { input: 0 });
+	// junk / missing
+	assert.equal(liveCostFrom({ pricing: { prompt: "free" } }), undefined);
+	assert.equal(liveCostFrom({}), undefined);
+	assert.equal(liveCostFrom(undefined), undefined);
+	// negative numbers ignored
+	assert.equal(liveCostFrom({ pricing: { prompt: -1 } }), undefined);
+});
+
+test("buildModel cost policy: fill-zero (default) / always / off, override wins all", () => {
+	const live = { pricing: { prompt: "0.000002", completion: "0.000004" } };
+	const staticDef = { cost: { input: 3, output: 6 } };
+
+	// fill-zero: an explicit static cost wins as-is
+	assert.deepEqual(buildModel("m", live, {}, staticDef).cost, { input: 3, output: 6 });
+	// fill-zero: nothing else defines cost -> live fills, missing cache keys become 0
+	const filled = buildModel("m", live, {}, undefined).cost;
+	assert.equal(filled.input, 2);
+	assert.equal(filled.output, 4);
+	assert.equal(filled.cacheRead, 0);
+	assert.equal(filled.cacheWrite, 0);
+	// always: live pricing beats static
+	assert.equal(buildModel("m", live, { costFromLive: "always" }, staticDef).cost.input, 2);
+	// off: live pricing ignored entirely
+	assert.deepEqual(buildModel("m", live, { costFromLive: "off" }, undefined).cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+	// override beats every policy
+	assert.equal(buildModel("m", live, { costFromLive: "always", overrides: { m: { cost: { input: 9 } } } }, staticDef).cost.input, 9);
+});
+
+test("buildCatalog: filters live items, merges metadata, union adds filtered static-only models", () => {
+	const filters = compileFilters("T.filters", { exclude: ["bad-*"] }, undefined);
+	const entry = { baseUrl: "https://x.example", mergeStatic: "union" } as ProviderEntry;
+	const staticById = {
+		"ghost-1": { contextWindow: 9999 },
+		"bad-ghost": {},
+		"live-1": { contextWindow: 1 }, // also static — must not duplicate
+	};
+	const items = [
+		{ id: "live-1", context_length: 100 },
+		{ id: "bad-live" },
+		{ name: "unnamed" }, // id via name fallback
+	];
+	const result = buildCatalog(items, { entry, filters, staticById });
+	assert.deepEqual(result.liveModels.map((m) => m.id), ["live-1", "unnamed"]);
+	assert.deepEqual(result.staticModels.map((m) => m.id), ["ghost-1"]); // bad-ghost filtered, live-1 not duplicated
+	assert.equal(result.liveModels[0].contextWindow, 100); // live hint beats static
+	assert.equal(result.staticModels[0].contextWindow, 9999);
+	assert.equal(result.outcomes.length, 3);
+
+	// default mergeStatic: static-only models not added
+	const plain = buildCatalog(items, { entry: { baseUrl: "https://x.example" } as ProviderEntry, filters, staticById });
+	assert.deepEqual(plain.staticModels, []);
+});
+
+test("buildCatalog: includeBy fields apply to live items during catalog build", () => {
+	const filters = compileFilters("T.filters", { includeBy: { owned_by: ["openai"] } }, undefined);
+	const entry = { baseUrl: "https://x.example" } as ProviderEntry;
+	const result = buildCatalog(
+		[
+			{ id: "m-1", owned_by: "openai" },
+			{ id: "m-2", owned_by: "system" },
+			{ id: "m-3" }, // field missing -> includeBy-miss
+		],
+		{ entry, filters, staticById: {} },
+	);
+	assert.deepEqual(result.liveModels.map((m) => m.id), ["m-1"]);
+	assert.equal(result.outcomes.find((o) => o.id === "m-3")!.reason, "includeBy-miss:owned_by");
 });

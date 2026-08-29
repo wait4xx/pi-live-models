@@ -23,14 +23,15 @@
  *     previous catalog — /model is never emptied by accident.
  *
  * Commands:
- *   /live-models            provider + filter + last-discovery status
- *   /live-models-reload     re-read config and re-register immediately
- *   /live-models-test <id>  dry-run discovery with per-model keep/drop reasons
+ *   /live-models             provider + filter + last-discovery status
+ *   /live-models-reload      re-read config and re-register immediately
+ *   /live-models-test <id>   dry-run discovery with per-model keep/drop reasons
+ *   /live-models-refresh [ids...] force an immediate refresh (bypasses throttling)
  */
 import fs from "node:fs";
 import { cachePath, configPath, loadConfigFile, type LiveModelsConfig, type ProviderEntry } from "./config.ts";
 import { applyFilters, compileFilters, summarizeDrops, type CompiledFilters, type FilterOutcome } from "./filters.ts";
-import { buildModel, buildModelsUrl, collectStaticById, resolveApiKey, type ModelDef, type RefreshContext } from "./discover.ts";
+import { buildCatalog, buildModelsUrl, collectStaticById, resolveApiKey, type ModelDef, type RefreshContext } from "./discover.ts";
 
 /** Structural subset of pi's ExtensionAPI used by this extension. */
 interface ExtensionAPI {
@@ -60,11 +61,14 @@ interface ProviderRuntime {
 interface CacheEntry {
 	at: string;
 	url: string;
-	models: ModelDef[];
+	/** v1 entries: merged ModelDef list (id-only re-filter on fallback). */
+	models?: ModelDef[];
+	/** v2 entries: raw endpoint items — fallback rebuilds through the full filter+merge pipeline. */
+	raw?: unknown[];
 }
 
 interface CacheFile {
-	version: 1;
+	version: 1 | 2;
 	providers: Record<string, CacheEntry>;
 }
 
@@ -74,16 +78,19 @@ class FilterEmptyError extends Error {}
 function readCache(): CacheFile {
 	try {
 		const raw: unknown = JSON.parse(fs.readFileSync(cachePath(), "utf8"));
-		if (raw && typeof raw === "object" && (raw as { version?: unknown }).version === 1) {
-			const providers = (raw as { providers?: unknown }).providers;
-			if (providers && typeof providers === "object" && !Array.isArray(providers)) {
-				return raw as CacheFile;
+		if (raw && typeof raw === "object") {
+			const version = (raw as { version?: unknown }).version;
+			if (version === 1 || version === 2) {
+				const providers = (raw as { providers?: unknown }).providers;
+				if (providers && typeof providers === "object" && !Array.isArray(providers)) {
+					return raw as CacheFile;
+				}
 			}
 		}
 	} catch {
 		// missing or malformed cache — start fresh
 	}
-	return { version: 1, providers: {} };
+	return { version: 2, providers: {} };
 }
 
 function writeCache(cache: CacheFile): void {
@@ -103,8 +110,11 @@ function modelsUrlOf(entry: ProviderEntry): string {
 	return entry.modelsUrl ?? buildModelsUrl(entry.baseUrl);
 }
 
-/** One live discovery pass: fetch, filter, merge metadata. Throws on any failure. */
-async function discoverOnce(rt: ProviderRuntime, context: RefreshContext | undefined): Promise<{ models: ModelDef[]; outcomes: FilterOutcome[]; url: string }> {
+/** One live discovery pass: fetch, filter, merge metadata, union static. Throws on any failure. */
+async function discoverOnce(
+	rt: ProviderRuntime,
+	context: RefreshContext | undefined,
+): Promise<{ models: ModelDef[]; outcomes: FilterOutcome[]; url: string; raw: unknown[]; staticCount: number }> {
 	const url = modelsUrlOf(rt.entry);
 	const key = context?.credential?.key ?? resolveApiKey(rt.id, rt.entry);
 	const headers: Record<string, string> = { ...(rt.entry.headers ?? {}) };
@@ -142,22 +152,11 @@ async function discoverOnce(rt: ProviderRuntime, context: RefreshContext | undef
 				: [];
 
 	const staticById = collectStaticById(rt.id);
-	const outcomes: FilterOutcome[] = [];
-	const models: ModelDef[] = [];
-	for (const item of items) {
-		const record: Record<string, unknown> = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
-		const id = typeof record.id === "string" && record.id
-			? record.id
-			: typeof record.name === "string" && record.name
-				? record.name
-				: "";
-		if (!id) continue;
-		const outcome = applyFilters(id, rt.filters);
-		outcomes.push(outcome);
-		if (outcome.kept) models.push(buildModel(id, record, rt.entry, staticById[id]));
-	}
+	const { liveModels, outcomes, staticModels } = buildCatalog(items, { entry: rt.entry, filters: rt.filters, staticById });
 
-	if (models.length === 0) {
+	// A zero-model LIVE result is a gateway/filter problem — static-only models
+	// from mergeStatic:"union" must never paper over it.
+	if (liveModels.length === 0) {
 		if (outcomes.length === 0) {
 			throw new FilterEmptyError(`0 usable models returned by ${url} — keeping previous catalog`);
 		}
@@ -165,7 +164,7 @@ async function discoverOnce(rt: ProviderRuntime, context: RefreshContext | undef
 		const drops = summary.drops.map((d) => `${d.reason} ×${d.count}`).join(", ");
 		throw new FilterEmptyError(`0 models survived filters from ${url} — dropped: ${drops} — keeping previous catalog`);
 	}
-	return { models, outcomes, url };
+	return { models: [...liveModels, ...staticModels], outcomes, url, raw: items, staticCount: staticModels.length };
 }
 
 function makeRefreshModels(rt: ProviderRuntime, cache: CacheFile): (context: RefreshContext) => Promise<ModelDef[]> {
@@ -175,13 +174,14 @@ function makeRefreshModels(rt: ProviderRuntime, cache: CacheFile): (context: Ref
 			return rt.lastModels;
 		}
 		try {
-			const { models, outcomes, url } = await discoverOnce(rt, context);
+			const { models, outcomes, url, raw, staticCount } = await discoverOnce(rt, context);
 			rt.lastModels = models;
 			rt.lastSuccessAt = Date.now();
 			const summary = summarizeDrops(outcomes);
 			const filterNote = summary.raw > summary.kept ? ` (filters: ${summary.raw} raw -> ${summary.kept} kept)` : "";
-			rt.lastResult = { ok: true, at: new Date().toISOString(), detail: `${models.length} models${filterNote}` };
-			cache.providers[rt.id] = { at: rt.lastResult.at, url, models };
+			const staticNote = staticCount > 0 ? ` (+${staticCount} static-only)` : "";
+			rt.lastResult = { ok: true, at: new Date().toISOString(), detail: `${models.length} models${staticNote}${filterNote}` };
+			cache.providers[rt.id] = { at: rt.lastResult.at, url, raw };
 			writeCache(cache);
 			return models;
 		} catch (err) {
@@ -197,7 +197,20 @@ function makeRefreshModels(rt: ProviderRuntime, cache: CacheFile): (context: Ref
 			// Network/HTTP/JSON failure: serve the persisted last-good list,
 			// re-filtered with the CURRENT rules so config changes are honored.
 			const cached = cache.providers[rt.id];
+			if (cached?.raw?.length) {
+				// v2 cache: rebuild through the full pipeline (field filters,
+				// merge ladder, union) from the raw items.
+				const { liveModels, staticModels } = buildCatalog(cached.raw, { entry: rt.entry, filters: rt.filters, staticById: collectStaticById(rt.id) });
+				if (liveModels.length) {
+					const models = [...liveModels, ...staticModels];
+					rt.lastModels = models;
+					rt.lastResult = { ok: true, at: new Date().toISOString(), detail: `serving cached ${models.length} models from ${cached.at} (${message})` };
+					console.warn(`${LOG} ${rt.id}: ${message} -> serving cached ${models.length} models from ${cached.at}`);
+					return models;
+				}
+			}
 			if (cached?.models?.length) {
+				// v1 cache: merged defs only — re-filter by id, best effort.
 				const models = cached.models.filter((m) => applyFilters(m.id, rt.filters).kept);
 				if (models.length) {
 					rt.lastModels = models;
@@ -214,9 +227,11 @@ function makeRefreshModels(rt: ProviderRuntime, cache: CacheFile): (context: Ref
 interface ExtensionState {
 	config: LiveModelsConfig;
 	runtimes: Map<string, ProviderRuntime>;
+	/** Single shared cache instance — re-read on /live-models-reload. */
+	cache: CacheFile;
 }
 
-function buildState(): ExtensionState {
+function buildState() {
 	const { config, issues, skipped } = loadConfigFile();
 	for (const issue of issues) console.warn(`${LOG} config: ${issue.message}`);
 	if (skipped.length) console.warn(`${LOG} skipped provider(s): ${skipped.join(", ")}`);
@@ -231,11 +246,11 @@ function buildState(): ExtensionState {
 	return { config, runtimes };
 }
 
-function registerAll(pi: ExtensionAPI, state: ExtensionState, cache: CacheFile): void {
+function registerAll(pi: ExtensionAPI, state: ExtensionState): void {
 	for (const rt of state.runtimes.values()) {
 		const cfg: Record<string, unknown> = {
 			baseUrl: rt.entry.baseUrl,
-			refreshModels: makeRefreshModels(rt, cache),
+			refreshModels: makeRefreshModels(rt, state.cache),
 		};
 		if (rt.entry.api) cfg.api = rt.entry.api;
 		if (rt.entry.name) cfg.name = rt.entry.name;
@@ -247,14 +262,22 @@ function registerAll(pi: ExtensionAPI, state: ExtensionState, cache: CacheFile):
 function filtersSummaryLine(rt: ProviderRuntime): string {
 	const includeCount = rt.filters.patterns.filter((p) => p.list === "include").length;
 	const excludeCount = rt.filters.patterns.filter((p) => p.list === "exclude").length;
-	if (!includeCount && !excludeCount) return "filters: none (all models pass)";
-	return `filters: ${includeCount} include / ${excludeCount} exclude pattern(s)${rt.filters.invalid.length ? ` (+${rt.filters.invalid.length} invalid ignored)` : ""}`;
+	const byParts: string[] = [];
+	if (rt.filters.includeBy.length) byParts.push(`includeBy[${rt.filters.includeBy.map((r) => r.field).join(",")}]`);
+	if (rt.filters.excludeBy.length) byParts.push(`excludeBy[${rt.filters.excludeBy.map((r) => r.field).join(",")}]`);
+	if (!includeCount && !excludeCount && !byParts.length) return "filters: none (all models pass)";
+	return `filters: ${includeCount} include / ${excludeCount} exclude pattern(s)${byParts.length ? ` + ${byParts.join(" + ")}` : ""}${rt.filters.invalid.length ? ` (+${rt.filters.invalid.length} invalid ignored)` : ""}`;
 }
 
 function statusLine(rt: ProviderRuntime): string {
 	const url = modelsUrlOf(rt.entry);
 	const api = rt.entry.api ? ` (${rt.entry.api})` : "";
-	const lines = [`${rt.id}${api}`, `  ${url}`, `  ${filtersSummaryLine(rt)}`];
+	const modes: string[] = [];
+	if (rt.entry.mergeStatic === "union") modes.push("mergeStatic=union");
+	if (rt.entry.costFromLive && rt.entry.costFromLive !== "fill-zero") modes.push(`costFromLive=${rt.entry.costFromLive}`);
+	const lines = [`${rt.id}${api}`, `  ${url}`];
+	if (modes.length) lines.push(`  mode: ${modes.join(" ")}`);
+	lines.push(`  ${filtersSummaryLine(rt)}`);
 	if (!rt.lastResult) {
 		lines.push("  (not refreshed yet — open /model or restart pi)");
 	} else if (rt.lastResult.ok) {
@@ -266,9 +289,8 @@ function statusLine(rt: ProviderRuntime): string {
 }
 
 export default function liveModelsExtension(pi: ExtensionAPI): void {
-	const cache = readCache();
-	const state = buildState();
-	registerAll(pi, state, cache);
+	const state: ExtensionState = { ...buildState(), cache: readCache() };
+	registerAll(pi, state);
 
 	pi.registerCommand("live-models", {
 		description: "Show pi-live-models providers, filters, and last live-discovery status",
@@ -285,10 +307,11 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("live-models-reload", {
 		description: "Reload live-models.json and re-register providers (takes effect immediately)",
 		handler: async (_args, ctx) => {
-			const next = buildState();
-			registerAll(pi, next, readCache());
+			const next: ExtensionState = { ...buildState(), cache: readCache() };
+			registerAll(pi, next);
 			state.config = next.config;
 			state.runtimes = next.runtimes;
+			state.cache = next.cache;
 			ctx.ui.notify(`${LOG} reloaded ${configPath()}\n${state.runtimes.size} provider(s) re-registered. Open /model to trigger live discovery.`);
 		},
 	});
@@ -308,25 +331,60 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 			}
 			ctx.ui.notify(`${LOG} testing ${id} — ${modelsUrlOf(rt.entry)} ...`);
 			try {
-				const { models, outcomes, url } = await discoverOnce(rt, undefined);
+				const { models, outcomes, url, staticCount } = await discoverOnce(rt, undefined);
 				const summary = summarizeDrops(outcomes);
 				const lines = outcomes.slice(0, TEST_LIST_LIMIT).map((outcome) => {
 					if (outcome.kept) return outcome.reason ? `  + ${outcome.id}  (kept by ${outcome.reason})` : `  + ${outcome.id}`;
 					return `  - ${outcome.id}  -> dropped by ${outcome.reason}`;
 				});
 				if (outcomes.length > TEST_LIST_LIMIT) lines.push(`  ... and ${outcomes.length - TEST_LIST_LIMIT} more`);
-				const preview = models.slice(0, 3).map((m) => `  ${m.id}: ctx=${m.contextWindow} max=${m.maxTokens} input=${m.input.join("+")}`);
+				const preview = models.slice(0, 3).map((m) => `  ${m.id}: ctx=${m.contextWindow} max=${m.maxTokens} cost=${m.cost.input}/${m.cost.output} $/1M input=${m.input.join("+")}`);
 				ctx.ui.notify(
 					[
 						`${LOG} ${id} dry-run — ${url}`,
 						...lines,
 						`summary: ${summary.raw} raw -> ${summary.kept} kept (${summary.raw - summary.kept} dropped)`,
+						...(staticCount > 0 ? [`+${staticCount} static-only model(s) added by mergeStatic=union`] : []),
 						...(preview.length ? ["metadata preview:", ...preview] : []),
 					].join("\n"),
 				);
 			} catch (err) {
 				ctx.ui.notify(`${LOG} ${id} dry-run failed: ${err instanceof Error ? err.message : String(err)}`);
 			}
+		},
+	});
+
+	pi.registerCommand("live-models-refresh", {
+		description: "Force an immediate live refresh, bypassing refreshIntervalMs (no argument = all providers)",
+		handler: async (args, ctx) => {
+			const wanted = args.trim().split(/\s+/).filter(Boolean);
+			const unknown = wanted.filter((id) => !state.runtimes.has(id));
+			if (unknown.length) {
+				ctx.ui.notify(`${LOG} unknown provider(s): ${unknown.join(", ")}\nConfigured: ${[...state.runtimes.keys()].join(", ") || "(none)"}`);
+				return;
+			}
+			const targets = (wanted.length ? wanted : [...state.runtimes.keys()]).map((id) => state.runtimes.get(id)!);
+			if (!targets.length) {
+				ctx.ui.notify(`${LOG} No providers configured in ${configPath()}`);
+				return;
+			}
+			const lines: string[] = [];
+			for (const rt of targets) {
+				try {
+					const { models, raw, url, staticCount } = await discoverOnce(rt, undefined);
+					rt.lastModels = models;
+					rt.lastSuccessAt = Date.now();
+					rt.lastResult = { ok: true, at: new Date().toISOString(), detail: `${models.length} models${staticCount > 0 ? ` (+${staticCount} static-only)` : ""}` };
+					state.cache.providers[rt.id] = { at: rt.lastResult.at, url, raw };
+					lines.push(`  OK   ${rt.id}: ${rt.lastResult.detail}`);
+				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					rt.lastResult = { ok: false, at: new Date().toISOString(), detail: msg };
+					lines.push(`  FAIL ${rt.id}: ${msg}`);
+				}
+			}
+			writeCache(state.cache);
+			ctx.ui.notify(`${LOG} forced refresh\n${lines.join("\n")}`);
 		},
 	});
 }
