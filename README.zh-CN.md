@@ -161,6 +161,7 @@ pi install git:github.com/wait4xx/pi-live-models
 - **数据源**：先 jsDelivr CDN，再 raw.githubusercontent.com 兜底——后台拉取，绝不阻塞发现流程。失败时发现照常进行（无目录参与），30 分钟退避后自动重试。
 - **缓存**：`~/.pi/agent/live-models-catalog.json`，7 天后台刷新。`/live-models-catalog-refresh` 可强制重拉。
 - **匹配**：仅精确同名匹配——永不做模糊匹配。`provider/` 前缀、`:suffix` 标签（`:free`、`:latest`）、日期后缀（`gpt-4o-2024-11-20`）在查询时归一化；目录里的精确键永远优先于归一化键。
+- **仲裁**（仅归一化键）：同一模型被多家部署时常携带各自平台的上限值，候选按层级仲裁——**厂商官方条目优先**（两段式 `厂商/模型` 键且 `litellm_provider` 与前缀一致，如 `zai/glm-4.6`）；无官方时**独立来源必须一致**（共识）；**不一致则弃用并告警**——模型落回静态/live 阶梯，告警列出各方数值并附 `/live-models-fix` 现成命令。**仅剩单一第三方部署且无官方条目**时静默跳过（无从核对；真实案例：某托管部署自报平台上限 1048575，厂商实际为 131072）。`/live-models-catalog` 显示仲裁统计。
 - **范围**：chat 类条目（无 `mode` 字段的条目保留）；数值须过合理性窗口（上下文 1,024–10,000,000 tokens，最大输出 128–10,000,000）。
 
 **改变什么**
@@ -294,7 +295,7 @@ live 值必须先过合理性窗口才能赢得所在层：上下文整数 1,024
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # node:test via tsx（62 个用例）
+npm test            # node:test via tsx（70 个用例）
 npm run smoke       # 对真实配置注册（不进 TUI）
 npx tsx scripts/smoke.ts GLM   # + GLM 真实刷新一轮
 ```

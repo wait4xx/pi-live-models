@@ -450,12 +450,14 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 				return;
 			}
 			const ageH = Math.round((Date.now() - data.fetchedAt) / 3_600_000);
+			const idx = buildCatalogIndex(data.models);
 			ctx.ui.notify(
 				[
 					`${LOG} catalog`,
 					`  source: ${data.url}`,
 					`  fetched: ${new Date(data.fetchedAt).toISOString()} (${ageH < 1 ? "<1h" : `${ageH}h`} ago)`,
 					`  entries: ${Object.keys(data.models).length} models`,
+				`  arbitration: ${idx.byKey.size} matchable / ${idx.divergent.size} divergent (skipped+warned) / ${idx.unverified.size} unverified (lone third-party, silent)`,
 					`  cache: ${catalogPath()}`,
 					`  refreshed in the background every ${Math.round(CATALOG_TTL_MS / 86_400_000)}d`,
 				].join("\n"),

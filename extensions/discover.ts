@@ -14,6 +14,7 @@ import {
 	CONTEXT_WINDOW_MIN,
 	MAX_TOKENS_MAX,
 	MAX_TOKENS_MIN,
+	normalizeModelKey,
 	saneWindow,
 	catalogLookup,
 	type CatalogIndex,
@@ -358,6 +359,17 @@ function collectWarnings(
 	catalog: CatalogIndex | undefined,
 ): string[] {
 	const warnings: string[] = [];
+	// Abstained catalog matches first — they explain why no catalog
+	// correction applies and hand the decision to the user.
+	if (catalog) {
+		for (const { id } of keptItems) {
+			const signatures = catalog.divergent.get(normalizeModelKey(id));
+			if (signatures === undefined) continue;
+			const shown = signatures.slice(0, 3).join(" / ");
+			const extra = signatures.length > 3 ? ` (+${signatures.length - 3} more)` : "";
+			warnings.push(`⚠ ${id}: catalog match skipped — providers disagree (${shown}${extra}) — pin the correct value with /live-models-fix ${providerId} ${id} ctx=<n> [max=<n>]`);
+		}
+	}
 	const ctxCounts = new Map<number, number>();
 	for (const { id, record } of keptItems) {
 		const liveCtx = liveNumber(record, CONTEXT_KEYS);

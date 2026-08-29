@@ -96,7 +96,7 @@ test("catalogLookup: exact key wins over dated alias; basename and normalized hi
 	const index = buildCatalogIndex({
 		"gpt-4o": { contextWindow: 128000 },
 		"gpt-4o-2024-11-20": { contextWindow: 111111 }, // normalized alias of gpt-4o
-		"gemini/gemini-2.5-pro": { contextWindow: 1048576 },
+		"gemini/gemini-2.5-pro": { contextWindow: 1048576, provider: "gemini" }, // vendor entry (two-segment, provider matches)
 		"claude-sonnet-4-5": { contextWindow: 200000 },
 	});
 	// exact raw key

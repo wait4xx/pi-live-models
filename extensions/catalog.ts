@@ -46,6 +46,12 @@ export interface CatalogModelEntry {
 	contextWindow?: number;
 	/** Community value for the max output/completion tokens. */
 	maxTokens?: number;
+	/** litellm_provider of this entry ("zai", "together_ai", …) — the
+	 *  catalog's own attribution of WHO serves this deployment. A two-segment
+	 *  key "P/model" whose provider === P is the vendor's own entry and wins
+	 *  arbitration; third-party hosted entries ("together_ai/zai-org/X",
+	 *  three segments) never do. */
+	provider?: string;
 }
 
 export interface CatalogData {
@@ -90,7 +96,9 @@ export function saneWindow(value: unknown, min: number, max: number): value is n
  *   lower-case -> strip `:suffix` (:latest, :free) -> strip provider prefix
  *   (basename) -> strip date suffix (-20241120, -251222, -2024-11-20).
  * Conservative by design: no fuzzy or prefix matching — a wrong context
- * length is worse than none.
+ * length is worse than none. When several catalog entries normalize to
+ * the SAME key but disagree on values, the key abstains entirely (see
+ * buildCatalogIndex).
  */
 export function normalizeModelKey(raw: string): string {
 	let key = raw.toLowerCase().trim();
@@ -118,6 +126,9 @@ export function parseLiteLLMCatalog(json: unknown): Record<string, CatalogModelE
 		if (!key || !isPlainObject(value)) continue;
 		if (value.mode !== undefined && value.mode !== "chat") continue;
 		const entry: CatalogModelEntry = {};
+		if (typeof value.litellm_provider === "string" && value.litellm_provider !== "") {
+			entry.provider = value.litellm_provider;
+		}
 		if (saneWindow(value.max_input_tokens, CONTEXT_WINDOW_MIN, CONTEXT_WINDOW_MAX)) {
 			entry.contextWindow = value.max_input_tokens;
 		}
@@ -134,24 +145,90 @@ export interface CatalogIndex {
 	data: CatalogData;
 	/** raw-lowercase and normalized keys -> entry (exact keys registered first, so they win). */
 	byKey: Map<string, CatalogModelEntry>;
+	/** Normalized keys ABSTAINED from matching: candidates disagree on the
+	 *  values (key -> the distinct value signatures seen). Lookups miss so
+	 *  the model falls back to the static/live ladder; callers surface a
+	 *  warning pointing at /live-models-fix. */
+	divergent: Map<string, string[]>;
+	/** Normalized keys with a single third-party candidate and no vendor
+	 *  entry — nothing to cross-check, so they are silently skipped (counted
+	 *  for /live-models-catalog). Observed in the wild: a lone hosted
+	 *  deployment carrying its own platform limits. */
+	unverified: Map<string, string>;
+}
+
+/** Value signature used for cross-source agreement checks + warning text. */
+function entrySignature(entry: CatalogModelEntry): string {
+	return `ctx=${entry.contextWindow ?? "?"} max=${entry.maxTokens ?? "?"}`;
+}
+
+/** A two-segment key "P/model" whose litellm_provider === P is the VENDOR's
+ *  own catalog entry ("zai/glm-4.6", provider zai). Hosted deployments
+ *  ("together_ai/zai-org/GLM-5.3-Flash", three segments) and bare keys
+ *  (registered as exact matches earlier) never reach this check. */
+function isVendorEntry(rawKey: string, entry: CatalogModelEntry): boolean {
+	if (entry.provider === undefined) return false;
+	const slash = rawKey.indexOf("/");
+	if (slash <= 0 || rawKey.indexOf("/", slash + 1) !== -1) return false; // not exactly two segments
+	return rawKey.slice(0, slash) === entry.provider;
 }
 
 /**
- * Build the lookup index. Raw lower-cased keys are registered before
- * normalized ones, so `gpt-4o` (the maintained primary entry) wins over a
- * dated alias `gpt-4o-2024-11-20` when both normalize to the same key.
+ * Build the lookup index. Raw lower-cased keys are registered first (exact
+ * matches keep priority). Normalized keys are then arbitrated in three
+ * tiers — vendor truth first, community consensus second, silence third:
+ *
+ *   1. VENDOR ENTRY WINS: any two-segment "P/model" candidate whose
+ *      litellm_provider === P (the vendor's own numbers) beats everyone.
+ *      Multiple vendor entries must agree, else the key abstains.
+ *   2. NO VENDOR -> CONSENSUS: all candidates agree on the values.
+ *   3. DISAGREEMENT -> ABSTAIN: the key lands in `divergent`, lookups miss,
+ *      and a warning points the user at /live-models-fix.
+ *   A lone third-party candidate with no vendor entry is `unverified` —
+ *   silently skipped (nothing to cross-check against; observed in the wild:
+ *   a hosted deployment stamping its own platform limits, e.g.
+ *   together_ai 1048575 where the vendor says 128000).
  */
 export function buildCatalogIndex(models: Record<string, CatalogModelEntry>): CatalogIndex {
 	const byKey = new Map<string, CatalogModelEntry>();
+	const divergent = new Map<string, string[]>();
+	const unverified = new Map<string, string>();
 	const raw: Array<[string, CatalogModelEntry]> = Object.entries(models).map(([k, v]) => [k.toLowerCase(), v]);
 	for (const [key, entry] of raw) {
 		if (!byKey.has(key)) byKey.set(key, entry);
 	}
-	for (const [key, entry] of raw) {
-		const norm = normalizeModelKey(key);
-		if (norm && !byKey.has(norm)) byKey.set(norm, entry);
+	const groups = new Map<string, Array<[string, CatalogModelEntry]>>();
+	for (const pair of raw) {
+		const norm = normalizeModelKey(pair[0]);
+		if (!norm || norm === pair[0]) continue; // exact key already registered above
+		const group = groups.get(norm);
+		if (group) group.push(pair);
+		else groups.set(norm, [pair]);
 	}
-	return { data: { url: "", fetchedAt: 0, models }, byKey };
+	for (const [norm, group] of groups) {
+		if (byKey.has(norm)) continue; // an exact key owns this name — its value stands
+		const vendors = group.filter(([key, entry]) => isVendorEntry(key, entry));
+		if (vendors.length > 0) {
+			const signatures = [...new Set(vendors.map(([, e]) => entrySignature(e)))];
+			if (signatures.length === 1) {
+				byKey.set(norm, (vendors[0] as [string, CatalogModelEntry])[1]);
+			} else {
+				divergent.set(norm, signatures);
+			}
+			continue;
+		}
+		const signatures = [...new Set(group.map(([, e]) => entrySignature(e)))];
+		if (signatures.length === 1) {
+			if (group.length >= 2) {
+				byKey.set(norm, (group[0] as [string, CatalogModelEntry])[1]); // consensus of independent sources
+			} else {
+				unverified.set(norm, (signatures as string[])[0] as string); // nothing to cross-check
+			}
+		} else {
+			divergent.set(norm, signatures);
+		}
+	}
+	return { data: { url: "", fetchedAt: 0, models }, byKey, divergent, unverified };
 }
 
 /** Exact-normalized lookup only — never fuzzy. */

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.1] - 2026-08-29
+
+Catalog arbitration: vendor truth first, consensus second, disagreement warns.
+
+### Fixed
+
+- **Normalized-key arbitration** (incident: `glm-5.3-flash` matched a lone hosted deployment and reported `maxTokens=1048575`, blowing past gateways that cap `max_tokens` at 131072 → hard 400s). Normalized lookups are now arbitrated in tiers:
+  1. **Vendor entry wins** — a two-segment `vendor/model` catalog key whose `litellm_provider` matches the prefix (e.g. `zai/glm-4.6`) is the vendor's own number and beats every hosted deployment; conflicting vendor entries abstain.
+  2. **No vendor → consensus** — independent sources must agree on the values.
+  3. **Disagreement → abstain + warn** — the model falls back to the static/live ladder; the warning lists the competing values with a ready-made `/live-models-fix` hint.
+  4. A **lone third-party deployment** (no vendor entry, nothing to cross-check) is silently skipped and counted.
+- Catalog entries now retain `litellm_provider` (the catalog's own source attribution). Old 0.3.0 disk caches lack it and simply degrade to consensus/arbitration until the next background refresh.
+- `/live-models-catalog` shows arbitration totals (matchable / divergent / unverified).
+
 ## [0.3.0] - 2026-08-29
 
 Public metadata catalog (gateway cross-check), README preview image, and three new commands.

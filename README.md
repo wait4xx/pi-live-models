@@ -180,6 +180,7 @@ Many relay gateways stamp every model with the same `context_length` (usually `1
 - **Sources**: jsDelivr CDN first, raw.githubusercontent.com fallback — fetched in the background, never blocking discovery. On failure, discovery proceeds without the catalog and retries after a 30-minute backoff.
 - **Cache**: `~/.pi/agent/live-models-catalog.json`, refreshed in the background after 7 days. `/live-models-catalog-refresh` forces a refetch.
 - **Matching**: exact model-name match only — no fuzzy matching, ever. `provider/` prefixes, `:suffix` tags (`:free`, `:latest`) and date suffixes (`gpt-4o-2024-11-20`) are normalized for the lookup; an exact catalog entry always beats a normalized one.
+- **Arbitration** (normalized keys only): the same model deployed by several providers routinely carries *deployment-specific* limits, so candidates are arbitrated in tiers — the **vendor's own entry wins** (a two-segment `vendor/model` key whose `litellm_provider` matches, e.g. `zai/glm-4.6`); with no vendor entry, **independent sources must agree** (consensus); **disagreement abstains** — the model falls back to the static/live ladder and a warning shows the competing values with a `/live-models-fix` hint. A **lone third-party deployment with no vendor entry** is silently skipped (nothing to cross-check; observed in the wild: a hosted deployment stamping its own platform limit — 1048575 — where the vendor says 131072). `/live-models-catalog` shows the arbitration totals.
 - **Scope**: chat-mode entries (entries without a `mode` field are kept); values must pass sanity windows (context 1,024–10,000,000 tokens, max output 128–10,000,000).
 
 **What it changes**
@@ -313,7 +314,7 @@ Live-only models fall back to `defaults`, then to pi-safe values (`reasoning: tr
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # node:test via tsx (62 tests)
+npm test            # node:test via tsx (70 tests)
 npm run smoke       # register against the real config (no TUI)
 npx tsx scripts/smoke.ts GLM   # + one live refreshModels pass for GLM
 ```
