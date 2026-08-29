@@ -122,6 +122,18 @@ test("presets: use flattens preset lists into entry filters (union), use field d
 	assert.equal(config.providers.GLM.filters?.use, undefined); // flattened away
 });
 
+test("presets: By-field contributions merge key-by-key into entry filters", () => {
+	const { config, issues } = parseConfig({
+		presets: { drop: { excludeBy: { owned_by: ["system"] } } },
+		providers: {
+			A: { baseUrl: "https://x.example", filters: { use: ["drop"], includeBy: { owned_by: ["openai"], extra: ["x"] } } },
+		},
+	});
+	assert.deepEqual(issues, []);
+	assert.deepEqual(config.providers.A.filters?.excludeBy, { owned_by: ["system"] });
+	assert.deepEqual(config.providers.A.filters?.includeBy, { owned_by: ["openai"], extra: ["x"] });
+});
+
 test("presets: unknown preset warns and is ignored; valid siblings still apply", () => {
 	const { config, issues } = parseConfig({
 		presets: { good: { exclude: ["x*"] } },

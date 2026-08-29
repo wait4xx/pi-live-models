@@ -95,7 +95,9 @@ function readCache(): CacheFile {
 
 function writeCache(cache: CacheFile): void {
 	try {
-		fs.writeFileSync(cachePath(), JSON.stringify(cache, null, 2), "utf8");
+		// Always persist as v2 (raw-items format), even when the in-memory file
+		// was read from a v1 cache — the version marker must not lag behind.
+		fs.writeFileSync(cachePath(), JSON.stringify({ version: 2, providers: cache.providers }, null, 2), "utf8");
 	} catch (err) {
 		console.warn(`${LOG} cache write failed:`, err instanceof Error ? err.message : err);
 	}
@@ -167,8 +169,12 @@ async function discoverOnce(
 	return { models: [...liveModels, ...staticModels], outcomes, url, raw: items, staticCount: staticModels.length };
 }
 
-function makeRefreshModels(rt: ProviderRuntime, cache: CacheFile): (context: RefreshContext) => Promise<ModelDef[]> {
+function makeRefreshModels(rt: ProviderRuntime, state: ExtensionState): (context: RefreshContext) => Promise<ModelDef[]> {
 	return async (context: RefreshContext) => {
+		// Captures `state` (not a cache instance): /live-models-reload swaps
+		// state.cache in place, so even in-flight closures created before the
+		// reload read+write the CURRENT cache instance — no stale-instance
+		// full-file write can roll back newer entries.
 		const interval = rt.entry.refreshIntervalMs ?? 0;
 		if (interval > 0 && rt.lastModels && Date.now() - rt.lastSuccessAt < interval) {
 			return rt.lastModels;
@@ -181,8 +187,8 @@ function makeRefreshModels(rt: ProviderRuntime, cache: CacheFile): (context: Ref
 			const filterNote = summary.raw > summary.kept ? ` (filters: ${summary.raw} raw -> ${summary.kept} kept)` : "";
 			const staticNote = staticCount > 0 ? ` (+${staticCount} static-only)` : "";
 			rt.lastResult = { ok: true, at: new Date().toISOString(), detail: `${models.length} models${staticNote}${filterNote}` };
-			cache.providers[rt.id] = { at: rt.lastResult.at, url, raw };
-			writeCache(cache);
+			state.cache.providers[rt.id] = { at: rt.lastResult.at, url, raw };
+			writeCache(state.cache);
 			return models;
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -196,7 +202,7 @@ function makeRefreshModels(rt: ProviderRuntime, cache: CacheFile): (context: Ref
 			if (err instanceof FilterEmptyError) throw err;
 			// Network/HTTP/JSON failure: serve the persisted last-good list,
 			// re-filtered with the CURRENT rules so config changes are honored.
-			const cached = cache.providers[rt.id];
+			const cached = state.cache.providers[rt.id];
 			if (cached?.raw?.length) {
 				// v2 cache: rebuild through the full pipeline (field filters,
 				// merge ladder, union) from the raw items.
@@ -250,7 +256,7 @@ function registerAll(pi: ExtensionAPI, state: ExtensionState): void {
 	for (const rt of state.runtimes.values()) {
 		const cfg: Record<string, unknown> = {
 			baseUrl: rt.entry.baseUrl,
-			refreshModels: makeRefreshModels(rt, state.cache),
+			refreshModels: makeRefreshModels(rt, state),
 		};
 		if (rt.entry.api) cfg.api = rt.entry.api;
 		if (rt.entry.name) cfg.name = rt.entry.name;

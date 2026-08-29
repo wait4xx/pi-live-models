@@ -120,6 +120,9 @@ test("buildModel cost policy: fill-zero (default) / always / off, override wins 
 	assert.equal(filled.cacheWrite, 0);
 	// always: live pricing beats static
 	assert.equal(buildModel("m", live, { costFromLive: "always" }, staticDef).cost.input, 2);
+	// always merges KEY BY KEY: a live entry reporting only pricing.prompt keeps static output
+	const promptOnly = { pricing: { prompt: "0.000002" } };
+	assert.deepEqual(buildModel("m", promptOnly, { costFromLive: "always" }, staticDef).cost, { input: 2, output: 6, cacheRead: 0, cacheWrite: 0 });
 	// off: live pricing ignored entirely
 	assert.deepEqual(buildModel("m", live, { costFromLive: "off" }, undefined).cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 	// override beats every policy
@@ -149,6 +152,20 @@ test("buildCatalog: filters live items, merges metadata, union adds filtered sta
 	// default mergeStatic: static-only models not added
 	const plain = buildCatalog(items, { entry: { baseUrl: "https://x.example" } as ProviderEntry, filters, staticById });
 	assert.deepEqual(plain.staticModels, []);
+});
+
+test("buildCatalog: duplicate live ids (gateway alias) yield one entry, first wins", () => {
+	const filters = compileFilters("T.filters", undefined, undefined);
+	const result = buildCatalog(
+		[
+			{ id: "m-1", context_length: 100 },
+			{ id: "m-1", context_length: 200 },
+		],
+		{ entry: { baseUrl: "https://x.example" } as ProviderEntry, filters, staticById: {} },
+	);
+	assert.equal(result.liveModels.length, 1);
+	assert.equal(result.liveModels[0].contextWindow, 100);
+	assert.equal(result.outcomes.length, 1);
 });
 
 test("buildCatalog: includeBy fields apply to live items during catalog build", () => {

@@ -70,6 +70,19 @@ test("global defaultFilters union with entry excludes but never create a whiteli
 	assert.equal(applyFilters("whatever", f).kept, true);
 });
 
+test("global defaultFilters.excludeBy joins the blacklist union (field-level)", () => {
+	const f = compile(undefined, { excludeBy: { owned_by: ["system"] } });
+	assert.equal(applyFilters("m-1", f, { owned_by: "system" }).kept, false);
+	assert.equal(applyFilters("m-1", f, { owned_by: "system" }).reason, "excludeBy:owned_by:system");
+	assert.equal(applyFilters("m-1", f, { owned_by: "openai" }).kept, true);
+	assert.equal(applyFilters("m-1", f, { owned_by: "openai" }).reason, undefined);
+	// combined with entry-level id excludes
+	const g = compile({ exclude: ["bad-*"] }, { excludeBy: { owned_by: ["system"] } });
+	assert.equal(applyFilters("m-1", g, { owned_by: "system" }).kept, false);
+	assert.equal(applyFilters("bad-1", g, { owned_by: "openai" }).kept, false);
+	assert.equal(applyFilters("m-1", g, { owned_by: "openai" }).kept, true);
+});
+
 test("summarizeDrops aggregates counts, biggest first", () => {
 	const f = compile({ exclude: ["*audio*"] });
 	const outcomes = ["a", "b", "audio-1", "audio-2", "c"].map((id) => applyFilters(id, f));

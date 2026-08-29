@@ -134,7 +134,7 @@ export function liveNumber(item: Record<string, unknown> | undefined, keyPaths: 
 const CONTEXT_KEYS = ["context_length", "context_window", "max_context_tokens", "max_model_len", "maximum_context_length"];
 const MAX_TOKENS_KEYS = ["max_completion_tokens", "max_tokens", "top_provider.max_completion_tokens", "top_provider.max_tokens"];
 
-/** Fill missing cost keys with 0 so downstream consumers always see four finite numbers. */
+/** Fill missing/invalid cost keys with 0 for live-derived costs. Explicit config costs (override/static/defaults) pass through unchanged, preserving v0.1.0 semantics. */
 function normalizeCost(cost: Record<string, number>): Record<string, number> {
 	const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
 	return { input: num(cost.input), output: num(cost.output), cacheRead: num(cost.cacheRead), cacheWrite: num(cost.cacheWrite) };
@@ -149,10 +149,13 @@ function normalizeCost(cost: Record<string, number>): Record<string, number> {
  */
 export function liveCostFrom(item: Record<string, unknown> | undefined): Record<string, number> | undefined {
 	const cost: Record<string, number> = {};
+	// Strict decimal syntax — parseFloat would silently accept trailing garbage
+	// ("0.5/token") and hex ("0x2") as valid prices.
+	const NUMERIC = /^\d*\.?\d+(?:[eE][+-]?\d+)?$/;
 	const add = (key: string, path: string): void => {
 		const raw = walkPath(item, path);
 		if (typeof raw !== "string" && typeof raw !== "number") return;
-		const value = typeof raw === "number" ? raw : Number.parseFloat(raw);
+		const value = typeof raw === "number" ? raw : (NUMERIC.test(raw) ? Number.parseFloat(raw) : NaN);
 		if (!Number.isFinite(value) || value < 0) return;
 		cost[key] = value * 1e6;
 	};
@@ -179,17 +182,22 @@ export function buildModel(
 	const defaults = (entry.defaults ?? {}) as ModelDefaults;
 	const override = (entry.overrides?.[id] ?? {}) as ModelOverride;
 
-	// Cost ladder — override always wins; below that the costFromLive policy decides:
+	// Cost ladder — override always wins (key-level, highest); below that the
+	// costFromLive policy decides:
 	//   fill-zero (default): live pricing only when no other source defines cost;
-	//   always: live pricing beats static/defaults (machine-fresh beats stale);
+	//   always: live pricing beats static/defaults KEY BY KEY — a live entry
+	//          reporting only pricing.prompt keeps static output/cache prices;
 	//   off: live pricing ignored entirely.
 	const policy = entry.costFromLive ?? "fill-zero";
 	const liveCost = policy === "off" ? undefined : liveCostFrom(liveItem);
-	const normalizedLive = liveCost ? normalizeCost(liveCost) : undefined;
 	const explicit = pick<Record<string, number>>(override.cost, base?.cost as Record<string, number> | undefined, defaults.cost);
-	const cost = policy === "always"
-		? (pick<Record<string, number>>(override.cost, normalizedLive, base?.cost as Record<string, number> | undefined, defaults.cost) ?? ZERO_COST)
-		: (explicit ?? normalizedLive ?? ZERO_COST);
+	let cost: Record<string, number>;
+	if (policy === "always" && liveCost) {
+		const lower = normalizeCost((base?.cost as Record<string, number> | undefined) ?? defaults.cost ?? {});
+		cost = { ...lower, ...liveCost, ...(override.cost ?? {}) };
+	} else {
+		cost = explicit ?? (liveCost ? normalizeCost(liveCost) : undefined) ?? ZERO_COST;
+	}
 
 	const model: ModelDef = {
 		id,
@@ -255,6 +263,7 @@ export function buildCatalog(
 		const record: Record<string, unknown> = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
 		const id = modelIdOf(record);
 		if (!id) continue;
+		if (seen.has(id)) continue; // duplicate live id (gateway alias): first wins
 		seen.add(id);
 		const outcome = applyFilters(id, filters, record);
 		outcomes.push(outcome);
