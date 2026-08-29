@@ -30,7 +30,7 @@ pi-live-models solves all three with one config file and zero code.
 ```bash
 pi install npm:pi-live-models
 # or from git:
-pi install git:github.com/<you>/pi-live-models
+pi install git:github.com/wait4xx/pi-live-models
 ```
 
 Then create `~/.pi/agent/live-models.json` (see below) and restart pi.
