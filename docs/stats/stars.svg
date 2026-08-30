@@ -1,14 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="820" height="240" viewBox="0 0 820 240" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif">
-<rect width="820" height="240" fill="#ffffff"/>
-<line x1="46" y1="214.0" x2="804" y2="214.0" stroke="#d0d7de" stroke-width="1" stroke-dasharray="0"/><text x="38" y="218.0" text-anchor="end" font-size="11" fill="#57606a">0</text>
-<line x1="46" y1="169.0" x2="804" y2="169.0" stroke="#d0d7de" stroke-width="1" stroke-dasharray="3 4"/><text x="38" y="173.0" text-anchor="end" font-size="11" fill="#57606a">0</text>
-<line x1="46" y1="124.0" x2="804" y2="124.0" stroke="#d0d7de" stroke-width="1" stroke-dasharray="3 4"/><text x="38" y="128.0" text-anchor="end" font-size="11" fill="#57606a">1</text>
-<line x1="46" y1="79.0" x2="804" y2="79.0" stroke="#d0d7de" stroke-width="1" stroke-dasharray="3 4"/><text x="38" y="83.0" text-anchor="end" font-size="11" fill="#57606a">1</text>
-<line x1="46" y1="34.0" x2="804" y2="34.0" stroke="#d0d7de" stroke-width="1" stroke-dasharray="3 4"/><text x="38" y="38.0" text-anchor="end" font-size="11" fill="#57606a">1</text>
-<text x="46" y="232" font-size="11" fill="#57606a"></text>
-<text x="425" y="232" text-anchor="middle" font-size="11" fill="#57606a"></text>
-<text x="804" y="232" text-anchor="end" font-size="11" fill="#57606a"></text>
-<text x="425" y="124" text-anchor="middle" font-size="13" fill="#57606a">no data yet</text>
-<text x="46" y="20" font-size="14" font-weight="600" fill="#1f2328">wait4xx/pi-live-models — GitHub stars</text>
-<text x="804" y="20" text-anchor="end" font-size="12" fill="#57606a">0 total</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="520" viewBox="0 0 880 520" font-family="xkcd, 'Comic Sans MS', 'Comic Sans', 'Segoe Print', 'Chalkboard SE', cursive">
+<rect width="880" height="520" fill="#ffffff"/>
+<line x1="74" y1="364.0" x2="850" y2="364.0" stroke="#d0d7de" stroke-width="1.5" stroke-dasharray="2 7"/>
+<line x1="74" y1="256.0" x2="850" y2="256.0" stroke="#d0d7de" stroke-width="1.5" stroke-dasharray="2 7"/>
+<line x1="74" y1="148.0" x2="850" y2="148.0" stroke="#d0d7de" stroke-width="1.5" stroke-dasharray="2 7"/>
+<text x="64" y="477.0" text-anchor="end" font-size="13" fill="#57606a">0</text>
+<text x="64" y="261.0" text-anchor="end" font-size="13" fill="#57606a">1</text>
+<rect x="74" y="40" width="776" height="432" fill="none" stroke="#8b98a5" stroke-width="2" rx="3"/>
+<text x="462" y="256" text-anchor="middle" font-size="16" fill="#57606a">no data yet</text>
+<rect x="88" y="52" width="243" height="54" fill="#ffffff" stroke="#8b98a5" stroke-width="1.5" rx="6"/>
+<line x1="100" y1="69" x2="124" y2="69" stroke="#3297d4" stroke-width="3" stroke-linecap="round"/>
+<text x="132" y="74" font-size="14" fill="#1f2328">wait4xx/pi-live-models</text>
+<text x="100" y="94" font-size="12" fill="#57606a">0 stars</text>
 </svg>

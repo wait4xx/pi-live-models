@@ -80,56 +80,92 @@ function fmtNum(n) {
 }
 
 /**
- * Simple, readable line/area chart. points: [{date: "YYYY-MM-DD", value}] in
- * chronological order (dates may repeat — both points get drawn).
+ * Hand-drawn (star-history-style) line chart: xkcd-ish font stack, slightly
+ * wobbling line, dotted grid, framed plot area, legend box with name + stats.
+ * points: [{date: "YYYY-MM-DD", value}] in chronological order.
  */
-function lineChart({ title, subtitle, points, color, fill }) {
-	const W = 820;
-	const H = 240;
-	const M = { top: 34, right: 16, bottom: 26, left: 46 };
+function lineChart({ name, stats, points, color }) {
+	const W = 880;
+	const H = 520;
+	const M = { top: 40, right: 30, bottom: 48, left: 74 };
 	const iw = W - M.left - M.right;
 	const ih = H - M.top - M.bottom;
+	const FONT = `xkcd, 'Comic Sans MS', 'Comic Sans', 'Segoe Print', 'Chalkboard SE', cursive`;
 
 	const noData = points.length === 0;
 	const maxValue = noData ? 1 : Math.max(...points.map((p) => p.value), 1);
-	const spanMs = noData ? 1 : Math.max(new Date(points.at(-1).date) - new Date(points[0].date), 86400_000);
-	const x = (p) => M.left + ((new Date(p.date) - new Date(points[0].date)) / spanMs) * iw;
+	const t0 = noData ? 0 : new Date(points[0].date).getTime();
+	const spanMs = noData ? 1 : Math.max(new Date(points.at(-1).date).getTime() - t0, 86400_000);
+	const x = (p) => M.left + ((new Date(p.date).getTime() - t0) / spanMs) * iw;
 	const y = (v) => M.top + ih - (v / maxValue) * ih;
 
-	const poly = points.map((p) => `${x(p).toFixed(1)},${y(p.value).toFixed(1)}`);
-	const area = noData ? "" : `${M.left},${M.top + ih} ${poly.join(" ")} ${M.left + iw},${M.top + ih}`;
-	const gridYs = [0, 0.25, 0.5, 0.75, 1];
-	const dateLabel = (frac) => {
-		if (noData) return "";
-		const d = new Date(new Date(points[0].date).getTime() + frac * spanMs);
+	// deterministic ±1.8px wobble (hash of the point index) — same input always
+	// renders identical bytes, so the daily commit only fires on real changes
+	const wob = (i) => {
+		let h = ((i + 1) * 2654435761) % 4294967296;
+		h = (h ^ (h >>> 13)) >>> 0;
+		h = (h * 1274126177) % 4294967296;
+		return (((h >>> 8) % 1000) / 1000 - 0.5) * 3.6;
+	};
+	const line = points.map((p, i) => `${x(p).toFixed(1)},${(y(p.value) + wob(i)).toFixed(1)}`);
+
+	const fracs = [0, 0.25, 0.5, 0.75, 1];
+	const fmtDay = (frac) => {
+		const d = new Date(t0 + frac * spanMs);
 		return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 	};
 
-	// series — no data -> readable placeholder; a single point renders as a
-	// centered marker (a lone polyline vertex is invisible in most renderers)
+	// legend box (top-left, inside the plot); width covers the longest line
+	const lx = M.left + 14;
+	const ly = M.top + 12;
+	const nameW = 12 + 24 + 8 + name.length * 8.4 + 14;
+	const statsW = stats ? 12 + stats.length * 6.2 + 14 : 0;
+	const legendW = Math.round(Math.max(nameW, statsW));
+	const legendH = stats ? 54 : 34;
+
 	const seriesSvg = noData
-		? `<text x="${M.left + iw / 2}" y="${M.top + ih / 2}" text-anchor="middle" font-size="13" fill="#57606a">no data yet</text>`
+		? `<text x="${M.left + iw / 2}" y="${M.top + ih / 2}" text-anchor="middle" font-size="16" fill="#57606a">no data yet</text>`
 		: points.length === 1
-			? `<circle cx="${(M.left + iw / 2).toFixed(1)}" cy="${y(points[0].value).toFixed(1)}" r="3" fill="${color}"/>`
-			: `<polygon points="${area}" fill="${fill}"/><polyline points="${poly.join(" ")}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round"/>`;
+			? `<circle cx="${(M.left + iw / 2).toFixed(1)}" cy="${y(points[0].value).toFixed(1)}" r="4" fill="${color}"/>`
+			: `<polyline points="${line.join(" ")}" fill="none" stroke="${color}" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>`;
 
 	return [
-		`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif">`,
+		`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="${FONT}">`,
 		`<rect width="${W}" height="${H}" fill="#ffffff"/>`,
-		// grid + y labels
-		...gridYs.map((f) => {
-			const gy = M.top + ih - f * ih;
-			return `<line x1="${M.left}" y1="${gy.toFixed(1)}" x2="${M.left + iw}" y2="${gy.toFixed(1)}" stroke="#d0d7de" stroke-width="1" stroke-dasharray="${f === 0 ? "0" : "3 4"}"/><text x="${M.left - 8}" y="${(gy + 4).toFixed(1)}" text-anchor="end" font-size="11" fill="#57606a">${fmtNum(Math.round(maxValue * f))}</text>`;
-		}),
-		// x labels
-		`<text x="${M.left}" y="${H - 8}" font-size="11" fill="#57606a">${esc(dateLabel(0))}</text>`,
-		`<text x="${M.left + iw / 2}" y="${H - 8}" text-anchor="middle" font-size="11" fill="#57606a">${esc(dateLabel(0.5))}</text>`,
-		`<text x="${M.left + iw}" y="${H - 8}" text-anchor="end" font-size="11" fill="#57606a">${esc(dateLabel(1))}</text>`,
-		// series svg (placeholder / single-point marker / area+line)
+		// interior dotted grid (horizontal)
+		...[0.25, 0.5, 0.75].map(
+			(f) =>
+				`<line x1="${M.left}" y1="${(M.top + ih - f * ih).toFixed(1)}" x2="${M.left + iw}" y2="${(M.top + ih - f * ih).toFixed(1)}" stroke="#d0d7de" stroke-width="1.5" stroke-dasharray="2 7"/>`,
+		),
+		// y labels (de-duplicated — tiny maxima round several ticks to the same text)
+		...(() => {
+			const seen = new Set();
+			return fracs
+				.map((f) => {
+					const label = fmtNum(Math.round(maxValue * f));
+					if (seen.has(label)) return "";
+					seen.add(label);
+					return `<text x="${M.left - 10}" y="${(M.top + ih - f * ih + 5).toFixed(1)}" text-anchor="end" font-size="13" fill="#57606a">${label}</text>`;
+				})
+				.filter(Boolean);
+		})(),
+		// x ticks + labels (meaningless without data — all dates would be 1970-01-01)
+		...(noData
+			? []
+			: fracs.map((f) => {
+				const tx = M.left + f * iw;
+				const anchor = f === 0 ? "start" : f === 1 ? "end" : "middle";
+				return `<line x1="${tx.toFixed(1)}" y1="${M.top + ih}" x2="${tx.toFixed(1)}" y2="${M.top + ih + 7}" stroke="#8b98a5" stroke-width="1.5"/><text x="${(f === 0 ? tx + 2 : f === 1 ? tx - 2 : tx).toFixed(1)}" y="${M.top + ih + 26}" text-anchor="${anchor}" font-size="13" fill="#57606a">${esc(fmtDay(f))}</text>`;
+			})),
+		// plot frame (drawn after grid so its edges stay crisp)
+		`<rect x="${M.left}" y="${M.top}" width="${iw}" height="${ih}" fill="none" stroke="#8b98a5" stroke-width="2" rx="3"/>`,
+		// series
 		seriesSvg,
-		// titles
-		`<text x="${M.left}" y="20" font-size="14" font-weight="600" fill="#1f2328">${esc(title)}</text>`,
-		`<text x="${W - M.right}" y="20" text-anchor="end" font-size="12" fill="#57606a">${esc(subtitle)}</text>`,
+		// legend
+		`<rect x="${lx}" y="${ly}" width="${legendW}" height="${legendH}" fill="#ffffff" stroke="#8b98a5" stroke-width="1.5" rx="6"/>`,
+		`<line x1="${lx + 12}" y1="${ly + 17}" x2="${lx + 36}" y2="${ly + 17}" stroke="${color}" stroke-width="3" stroke-linecap="round"/>`,
+		`<text x="${lx + 44}" y="${ly + 22}" font-size="14" fill="#1f2328">${esc(name)}</text>`,
+		...(stats ? [`<text x="${lx + 12}" y="${ly + 42}" font-size="12" fill="#57606a">${esc(stats)}</text>`] : []),
 		`</svg>`,
 	].join("\n");
 }
@@ -154,9 +190,15 @@ async function main() {
 	fs.mkdirSync(STATS_DIR, { recursive: true });
 	const results = [];
 
-	// npm downloads — the primary chart
+	// npm downloads — only when this repo ships an npm package
+	let pkg;
 	try {
-		const pkg = pkgName();
+		pkg = pkgName();
+	} catch {
+		console.error("[stats] no readable package.json — skipping npm chart");
+	}
+	if (pkg) {
+	try {
 		const { start, trimmed, series } = await fetchNpmDownloads(pkg, NPM_WINDOW_DAYS);
 		const total = series.reduce((s, p) => s + p.value, 0);
 		const last30 = series.slice(-30).reduce((s, p) => s + p.value, 0);
@@ -164,28 +206,35 @@ async function main() {
 		fs.writeFileSync(
 			path.join(STATS_DIR, "npm-downloads.svg"),
 			lineChart({
-				title: `${pkg} — npm downloads / day`,
-				subtitle,
+				name: pkg,
+				stats: `npm downloads/day · ${subtitle}`,
 				points: series,
-				color: "#1f883d",
-				fill: "rgba(31,136,61,0.12)",
+				color: "#42bb88",
 			}),
 		);
 		results.push(`npm-downloads.svg: ${series.length} days, ${total} total`);
 	} catch (err) {
-		// Keep the previous chart on transient npm API failures — a 5xx/429
-		// blip must not replace a good README chart with "unavailable" for a day.
-		console.error(`[stats] npm chart failed: ${err.message}`);
-		const target = path.join(STATS_DIR, "npm-downloads.svg");
-		if (!fs.existsSync(target)) {
-			fs.writeFileSync(
-				target,
-				lineChart({ title: `${pkgName()} — npm downloads / day`, subtitle: "unavailable", points: [], color: "#1f883d", fill: "rgba(31,136,61,0.12)" }),
-			);
+		// A package that is not on npm (private root package.json, monorepo
+		// shells) is not a failure — just skip the chart entirely.
+		if (/^404/.test(err.message)) {
+			console.error(`[stats] package not on npm — skipping npm chart (${err.message})`);
+			results.push("npm-downloads.svg: not on npm — skipped");
 		} else {
-			console.error("[stats] keeping previous npm chart");
+			// Keep the previous chart on transient npm API failures — a 5xx/429
+			// blip must not replace a good README chart with "unavailable" for a day.
+			console.error(`[stats] npm chart failed: ${err.message}`);
+			const target = path.join(STATS_DIR, "npm-downloads.svg");
+			if (!fs.existsSync(target)) {
+				fs.writeFileSync(
+					target,
+					lineChart({ name: pkg, stats: "npm downloads/day · unavailable", points: [], color: "#42bb88" }),
+				);
+			} else {
+				console.error("[stats] keeping previous npm chart");
+			}
+			results.push("npm-downloads.svg: FAILED");
 		}
-		results.push("npm-downloads.svg: FAILED");
+	}
 	}
 
 	// stars — best effort, needs GH_TOKEN
@@ -201,18 +250,17 @@ async function main() {
 		fs.writeFileSync(
 			path.join(STATS_DIR, "stars.svg"),
 			lineChart({
-				title: `${repo} — GitHub stars`,
-				subtitle: `${total} total`,
+				name: repo,
+				stats: `${total} stars`,
 				points: series,
-				color: "#0969da",
-				fill: "rgba(9,105,218,0.10)",
+				color: "#3297d4",
 			}),
 		);
 		results.push(`stars.svg: ${total} stars`);
 	} catch (err) {
 		console.error(`[stats] stars chart failed: ${err.message} — writing placeholder, keeping any previous chart`);
 		if (!fs.existsSync(path.join(STATS_DIR, "stars.svg"))) {
-			fs.writeFileSync(path.join(STATS_DIR, "stars.svg"), lineChart({ title: `${repo} — GitHub stars`, subtitle: "unavailable", points: [], color: "#0969da", fill: "rgba(9,105,218,0.10)" }));
+			fs.writeFileSync(path.join(STATS_DIR, "stars.svg"), lineChart({ name: repo, stats: "unavailable", points: [], color: "#3297d4" }));
 		}
 		results.push("stars.svg: FAILED");
 	}

@@ -11,10 +11,6 @@
   <img src="docs/preview.png" alt="pi-live-models — 实时模型发现预览" width="720">
 </p>
 
-<p align="center">
-  <img src="docs/stats/npm-downloads.svg" alt="pi-live-models npm 下载量" width="720">
-</p>
-
 让 [pi](https://github.com/earendil-works/pi) 每个 provider 的模型列表**实时反映端点真实可用模型**——每次打开 `/model` 自动刷新。
 
 适用于**任意** OpenAI 兼容 / Anthropic 协议网关（OpenRouter、各类中转、vLLM、LiteLLM、LM Studio、云厂商…），也能覆盖 pi **内置 provider** 的静态目录——同名 `registerProvider` 叠加在既有定义之上，非空实时列表整体替换静态目录。
@@ -321,6 +317,14 @@ npx tsx scripts/smoke.ts GLM   # + GLM 真实刷新一轮
 ```
 
 CI：Windows + Ubuntu × Node 22/24。
+
+## 统计
+
+曲线由零依赖的 [GitHub Action](.github/workflows/stats.yml)（[源码](scripts/render-stats.mjs)）每日重新生成并提交到本仓库——不依赖任何第三方图表服务。
+
+<p align="center">
+  <img src="docs/stats/npm-downloads.svg" alt="pi-live-models npm 下载量" width="720">
+</p>
 
 ## 许可证
 

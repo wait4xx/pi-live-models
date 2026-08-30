@@ -11,10 +11,6 @@
   <img src="docs/preview.png" alt="pi-live-models — live model discovery preview" width="720">
 </p>
 
-<p align="center">
-  <img src="docs/stats/npm-downloads.svg" alt="pi-live-models npm downloads" width="720">
-</p>
-
 Live `/v1/models` discovery for [pi](https://github.com/earendil-works/pi) — make every provider's model list reflect what the endpoint **actually serves**, refreshed every time you open `/model`.
 
 Works with **any** OpenAI-compatible or Anthropic-protocol gateway (OpenRouter, relay services, vLLM, LiteLLM, LM Studio, cloud vendors, …), **and** overrides the static catalogs of pi's **built-in** providers — `registerProvider()` with the same id layers on top of the composed base, and a non-empty live list fully replaces it.
@@ -340,6 +336,14 @@ npx tsx scripts/smoke.ts GLM   # + one live refreshModels pass for GLM
 ```
 
 CI: Windows + Ubuntu × Node 22/24.
+
+## Stats
+
+Charts are regenerated daily by a zero-dependency [GitHub Action](.github/workflows/stats.yml) ([source](scripts/render-stats.mjs)) and committed to this repo — no third-party chart service involved.
+
+<p align="center">
+  <img src="docs/stats/npm-downloads.svg" alt="pi-live-models npm downloads" width="720">
+</p>
 
 ## License
 
