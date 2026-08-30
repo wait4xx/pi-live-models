@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.3.3] - 2026-08-30
+
+Bootstrap UX: stop re-typing what `models.json` already knows.
+
+### Added
+
+- **`baseUrl` inheritance** — a provider entry may omit `baseUrl` and inherits it from the same-id provider in `models.json`. Explicit values always win; a present-but-invalid `baseUrl` is never silently inherited (you get the field-precise error instead). Together with the existing credential ladder (`/login` → entry `apiKey` → `models.json` → env), a minimal declaration is now `{ "providers": { "MYGATEWAY": {} } }`.
+- **`/live-models-init`** — one-command bootstrap on a new machine: writes a `{ baseUrl }` stub for every `models.json` provider not yet configured (idempotent — existing entries are never overwritten, a broken config file is never clobbered, prototype-reserved ids are rejected), then re-registers immediately. Pure planning logic (`computeInitPlan` / `applyInitToRawConfig`) is exported and unit-tested.
+
+### Changed
+
+- `/live-models-reload` and `/live-models-init` share one reload path (`reloadState`) — the mutate-in-place state semantics documented for reload now apply verbatim to post-init re-registration.
+- Missing-`baseUrl` skip messages now name the inheritance source when a `models.json` lookup was attempted (`no usable "X" provider in models.json to inherit from`).
+
+### Fixed
+
+- A `providers` key naming `__proto__` / `constructor` / `prototype` in `live-models.json` (possible via `JSON.parse`) used to re-`[[Prototype]]` the parsed map and silently vanish — it now gets a field-precise issue and is skipped like any other invalid entry. Init's plan and apply existence checks are aligned on `hasOwnProperty` so a pathological models.json provider id can never make the success notice over-report.
+
 ## [0.3.2] - 2026-08-29
 
 Second catalog source (Models.dev) + tolerance-based merging.

@@ -43,7 +43,7 @@ pi install npm:pi-live-models
 pi install git:github.com/wait4xx/pi-live-models
 ```
 
-然后创建 `~/.pi/agent/live-models.json`（见下文）并重启 pi。
+然后创建 `~/.pi/agent/live-models.json`（见下文）并重启 pi。`models.json` 里已有 provider？在 pi 里跑一次 `/live-models-init`——它会为每个 `models.json` provider 写入一条 stub（幂等，已有条目不动）；或者只写 id 让它继承（见下）。
 
 ## 快速上手
 
@@ -63,9 +63,15 @@ pi install git:github.com/wait4xx/pi-live-models
 
 在 pi 里打开 `/model`——列表即刻镜像 `GET https://gw.example.com/v1/models`，再减去你排除的模式。`/live-models` 看状态，`/live-models-test MYGATEWAY` 调过滤。
 
+条目可以省略 `baseUrl`，自动从 `models.json` 里同名 provider 继承（凭据本来就支持从 `models.json` 解析）：
+
+```jsonc
+{ "providers": { "MYGATEWAY": { "filters": { "exclude": ["*embedding*"] } } } }
+```
+
 ## 配置参考
 
-文件：`~/.pi/agent/live-models.json`（尊重 `$PI_CODING_AGENT_DIR`）。校验按字段精确定位、优雅降级：非法字段警告并忽略；只有 `baseUrl` 不可用的条目才会整条跳过。配置手误永远不会弄崩 pi 启动。
+文件：`~/.pi/agent/live-models.json`（尊重 `$PI_CODING_AGENT_DIR`）。校验按字段精确定位、优雅降级：非法字段警告并忽略；只有 `baseUrl` 不可用——显式缺失且无法从 `models.json` 同名 provider 继承——的条目才会整条跳过。配置手误永远不会弄崩 pi 启动。
 
 **顶层字段**
 
@@ -79,7 +85,7 @@ pi install git:github.com/wait4xx/pi-live-models
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `baseUrl` | ✅ | API 根地址。模型端点自动推导：以版本段（`/v1`、`/v2`…）结尾 → `{base}/models`，否则 → `{base}/v1/models`。 |
+| `baseUrl` | ✅* | API 根地址。模型端点自动推导：以版本段（`/v1`、`/v2`…）结尾 → `{base}/models`，否则 → `{base}/v1/models`。*可省略，从 `models.json` 同名 provider 继承；显式写了但非法的值绝不继承。* |
 | `modelsUrl` | — | 推导规则不适用时，显式指定模型端点。 |
 | `api` | — | `openai-completions` / `openai-responses` / `anthropic-messages`。覆盖内置 provider 时可省略（继承原定义）。 |
 | `name` | — | 显示名。 |
@@ -200,6 +206,7 @@ live 值必须先过合理性窗口才能赢得所在层：上下文整数 1,024
 |---|---|
 | `/live-models` | 已配置的 provider、模型端点、过滤摘要、最近一次发现结果（`raw -> kept` 统计）。 |
 | `/live-models-reload` | 立即重读配置并重新注册（无需重启）。 |
+| `/live-models-init` | 引导初始化 `live-models.json`：为每个尚未配置的 `models.json` provider 写入一条 `{ baseUrl }` stub（幂等，已有条目不动，配置文件损坏时拒绝覆写），随后立即重新注册。 |
 | `/live-models-test <provider>` | 干跑一次发现：逐模型 `kept by …` / `dropped by …` 标注 + 元数据预览（上下文窗口、价格、输入类型）。 |
 | `/live-models-refresh [ids...]` | 绕过 `refreshIntervalMs` 强制立即刷新（无参数 = 全部 provider）。更新内存目录与持久缓存；失败原样展示（手动动作不走缓存回落）。 |
 | `/live-models-catalog` | 查看公共目录状态：双源条目数与拉取时间、合并数、仲裁统计、缓存路径。 |

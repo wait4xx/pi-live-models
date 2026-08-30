@@ -26,6 +26,7 @@
  * Commands:
  *   /live-models             provider + filter + last-discovery status
  *   /live-models-reload      re-read config and re-register immediately
+ *   /live-models-init        bootstrap: add stub entries for models.json providers (idempotent)
  *   /live-models-test <id>   dry-run discovery with per-model keep/drop reasons
  *   /live-models-refresh [ids...] force an immediate refresh (bypasses throttling)
  *   /live-models-catalog     public metadata catalog status
@@ -36,11 +37,15 @@
 import fs from "node:fs";
 import {
 	applyFixToRawConfig,
+	applyInitToRawConfig,
 	cachePath,
 	catalogPath,
+	computeInitPlan,
 	configPath,
 	loadConfigFile,
 	modelsDevCatalogPath,
+	modelsJsonPath,
+	readStaticProviders,
 	type LiveModelsConfig,
 	type ProviderEntry,
 } from "./config.ts";
@@ -348,6 +353,20 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 	const state: ExtensionState = { ...buildState(), cache: readCache(), cat: createCatalogManager() };
 	registerAll(pi, state);
 
+	// Shared by /live-models-reload and /live-models-init. Mutates the
+	// long-lived `state` in place BEFORE registering, so every closure
+	// (including ones from earlier reloads) keeps reading the same state
+	// object — passing a fresh object would strand prior generations on
+	// stale cache instances. `cat` is deliberately kept: the catalog manager
+	// is disk-backed and has no per-config lifetime.
+	const reloadState = (): void => {
+		const next: ExtensionState = { ...buildState(), cache: readCache(), cat: state.cat };
+		state.config = next.config;
+		state.runtimes = next.runtimes;
+		state.cache = next.cache;
+		registerAll(pi, state);
+	};
+
 	pi.registerCommand("live-models", {
 		description: "Show pi-live-models providers, filters, and last live-discovery status",
 		handler: (_args, ctx) => {
@@ -363,17 +382,71 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("live-models-reload", {
 		description: "Reload live-models.json and re-register providers (takes effect immediately)",
 		handler: async (_args, ctx) => {
-			const next: ExtensionState = { ...buildState(), cache: readCache(), cat: state.cat };
-			// Mutate the long-lived `state` in place BEFORE registering, so every
-			// closure (including ones from earlier reloads) keeps reading the
-			// same state object — passing `next` itself would strand prior
-			// generations on stale cache instances. `cat` is deliberately kept:
-			// the catalog manager is disk-backed and has no per-config lifetime.
-			state.config = next.config;
-			state.runtimes = next.runtimes;
-			state.cache = next.cache;
-			registerAll(pi, state);
+			reloadState();
 			ctx.ui.notify(`${LOG} reloaded ${configPath()}\n${state.runtimes.size} provider(s) re-registered. Open /model to trigger live discovery.`);
+		},
+	});
+
+	pi.registerCommand("live-models-init", {
+		description: "Bootstrap live-models.json: add a stub entry for every models.json provider (idempotent; existing entries untouched)",
+		handler: (_args, ctx) => {
+			const statics = readStaticProviders();
+			if (!statics || Object.keys(statics).length === 0) {
+				ctx.ui.notify(`${LOG} no providers found in ${modelsJsonPath()} — nothing to initialize.`);
+				return;
+			}
+			let raw: unknown;
+			try {
+				raw = JSON.parse(fs.readFileSync(configPath(), "utf8"));
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+					ctx.ui.notify(`${LOG} cannot read ${configPath()}: ${err instanceof Error ? err.message : err}\nFix or delete the file, then retry.`);
+					return;
+				}
+				raw = {}; // first run: create the file fresh
+			}
+			const currentRaw = (raw as { providers?: unknown } | null)?.providers;
+			const currentProviders = currentRaw && typeof currentRaw === "object" && !Array.isArray(currentRaw) ? (currentRaw as Record<string, unknown>) : undefined;
+			const plan = computeInitPlan(statics, currentProviders);
+			if (!plan.toAdd.length) {
+				const parts: string[] = [];
+				if (plan.existing.length) parts.push(`all ${plan.existing.length} models.json provider(s) are already configured`);
+				if (plan.unusable.length) parts.push(`${plan.unusable.length} cannot be adopted (reserved id or no http(s) baseUrl)`);
+				ctx.ui.notify(`${LOG} nothing to add${parts.length ? ` — ${parts.join("; ")}` : ""}.`);
+				return;
+			}
+			const applied = applyInitToRawConfig(raw, plan.toAdd);
+			if (!applied.ok) {
+				ctx.ui.notify(`${LOG} ${applied.error}`);
+				return;
+			}
+			try {
+				const tmp = `${configPath()}.tmp`;
+				fs.writeFileSync(tmp, JSON.stringify(raw, null, 2), "utf8");
+				fs.renameSync(tmp, configPath());
+			} catch (err) {
+				try {
+					fs.rmSync(`${configPath()}.tmp`, { force: true });
+				} catch {
+					/* best effort */
+				}
+				ctx.ui.notify(`${LOG} failed to write ${configPath()}: ${err instanceof Error ? err.message : err}`);
+				return;
+			}
+			reloadState();
+			const lines = plan.toAdd.map((stub) => `  + ${stub.id}  ${stub.baseUrl}`);
+			const notes: string[] = [];
+			if (plan.existing.length) notes.push(`  = ${plan.existing.length} already configured (untouched)`);
+			if (plan.unusable.length) notes.push(`  ! not adopted (reserved id or no http(s) baseUrl): ${plan.unusable.join(", ")}`);
+			ctx.ui.notify(
+				[
+					`${LOG} wrote ${plan.toAdd.length} stub entr${plan.toAdd.length === 1 ? "y" : "ies"} to ${configPath()}:`,
+					...lines,
+					...notes,
+					`Stubs carry baseUrl only — credentials still resolve from /login, entry apiKey, models.json, or env.`,
+					`Providers re-registered — open /model to trigger live discovery.`,
+				].join("\n"),
+			);
 		},
 	});
 

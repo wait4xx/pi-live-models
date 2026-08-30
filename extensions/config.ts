@@ -6,7 +6,8 @@
  *
  * Validation philosophy: field-precise, graceful degradation — an invalid
  * field produces a warning and is dropped; only entries without a usable
- * `baseUrl` are skipped entirely. The extension must never crash pi startup
+ * `baseUrl` (explicit or inherited from the same-id models.json provider)
+ * are skipped entirely. The extension must never crash pi startup
  * because of a config typo.
  */
 import fs from "node:fs";
@@ -93,6 +94,21 @@ export interface ConfigIssue {
 	provider?: string;
 	field: string;
 	message: string;
+}
+
+/** The shape of a models.json provider entry, as used for baseUrl inheritance. */
+export interface StaticProviderRef {
+	baseUrl?: unknown;
+}
+
+/** Options for {@link parseConfig}. */
+export interface ParseOptions {
+	/**
+	 * models.json `providers` map. An entry that omits `baseUrl` inherits it
+	 * from the same-id provider here; an entry with no usable match is
+	 * skipped. Passing `null`/`undefined` disables inheritance entirely.
+	 */
+	staticProviders?: Record<string, StaticProviderRef> | null;
 }
 
 export function agentDir(): string {
@@ -258,6 +274,9 @@ function parseFilterSpec(
 	return any ? spec : undefined;
 }
 
+/** Provider ids that must never be written into a config file. */
+const RESERVED_IDS = new Set(["__proto__", "constructor", "prototype"]);
+
 function isHttpUrl(value: string): boolean {
 	try {
 		const parsed = new URL(value);
@@ -271,11 +290,15 @@ function isHttpUrl(value: string): boolean {
  * Parse + validate a raw config object.
  *
  * @param raw contents of live-models.json (already JSON.parse'd)
+ * @param opts pass `staticProviders` (models.json providers) to let entries
+ *             without an explicit `baseUrl` inherit it from the same-id
+ *             models.json provider
  * @returns the sanitized config, per-field issues, and the ids of providers
- *          that had to be skipped entirely (unusable baseUrl).
+ *          that had to be skipped entirely (no usable baseUrl).
  */
 export function parseConfig(
 	raw: unknown,
+	opts?: ParseOptions,
 ): { config: LiveModelsConfig; issues: ConfigIssue[]; skipped: string[] } {
 	const issues: ConfigIssue[] = [];
 	const skipped: string[] = [];
@@ -315,6 +338,15 @@ export function parseConfig(
 	}
 
 	for (const [id, entryRaw] of Object.entries(providers)) {
+		// A providers key naming an Object.prototype member (JSON.parse can
+		// create an own "__proto__" key) would either re-[[Prototype]] the map
+		// below or silently shadow an inherited member — reject it explicitly,
+		// like every other invalid entry.
+		if (RESERVED_IDS.has(id)) {
+			issues.push({ provider: id, field: "(entry)", message: `providers.${id} is not a valid provider id — entry skipped` });
+			skipped.push(id);
+			continue;
+		}
 		if (!isPlainObject(entryRaw)) {
 			issues.push({ provider: id, field: "(entry)", message: `providers.${id} must be an object — entry skipped` });
 			skipped.push(id);
@@ -322,19 +354,30 @@ export function parseConfig(
 		}
 		const entry: ProviderEntry = {} as ProviderEntry;
 
-		// baseUrl: required, http(s)
-		const baseUrl = optionalString(entryRaw.baseUrl);
-		if (!baseUrl) {
-			issues.push({ provider: id, field: "baseUrl", message: `providers.${id}.baseUrl is required — entry skipped` });
-			skipped.push(id);
-			continue;
+		// baseUrl: explicit value wins; an omitted baseUrl is inherited from
+		// the same-id models.json provider (when a staticProviders map was
+		// given); no usable source -> skip the entry entirely.
+		if (entryRaw.baseUrl !== undefined) {
+			const baseUrl = optionalString(entryRaw.baseUrl);
+			if (!baseUrl || !isHttpUrl(baseUrl)) {
+				issues.push({ provider: id, field: "baseUrl", message: `providers.${id}.baseUrl must be an http(s) URL — entry skipped` });
+				skipped.push(id);
+				continue;
+			}
+			entry.baseUrl = baseUrl;
+		} else {
+			const inherited = opts?.staticProviders ? optionalString(opts.staticProviders[id]?.baseUrl) : undefined;
+			if (inherited !== undefined && isHttpUrl(inherited)) {
+				entry.baseUrl = inherited;
+			} else {
+				const hint = opts?.staticProviders
+					? ` — entry skipped (no usable "${id}" provider in models.json to inherit from)`
+					: " — entry skipped";
+				issues.push({ provider: id, field: "baseUrl", message: `providers.${id}.baseUrl is required${hint}` });
+				skipped.push(id);
+				continue;
+			}
 		}
-		if (!isHttpUrl(baseUrl)) {
-			issues.push({ provider: id, field: "baseUrl", message: `providers.${id}.baseUrl must be an http(s) URL — entry skipped` });
-			skipped.push(id);
-			continue;
-		}
-		entry.baseUrl = baseUrl;
 
 		// optional plain strings
 		for (const field of ["name", "modelsUrl", "api", "apiKey"] as const) {
@@ -422,9 +465,8 @@ export function applyFixToRawConfig(
 	// Reject prototype-reserved ids: obj["__proto__"] hits the inherited
 	// getter (not an own property), which would let a fix write into
 	// Object.prototype and "succeed" without changing the file.
-	const reserved = new Set(["__proto__", "constructor", "prototype"]);
-	if (reserved.has(providerId) || reserved.has(modelId)) {
-		return { ok: false, error: `"${reserved.has(providerId) ? providerId : modelId}" is not a valid id` };
+	if (RESERVED_IDS.has(providerId) || RESERVED_IDS.has(modelId)) {
+		return { ok: false, error: `"${RESERVED_IDS.has(providerId) ? providerId : modelId}" is not a valid id` };
 	}
 	const providers = raw.providers;
 	if (!isPlainObject(providers) || !isPlainObject(providers[providerId])) {
@@ -440,9 +482,69 @@ export function applyFixToRawConfig(
 	return { ok: true };
 }
 
+export interface InitStub {
+	id: string;
+	baseUrl: string;
+}
+
+export interface InitPlan {
+	/** Provider ids absent from live-models.json that init would add, with their models.json baseUrl. */
+	toAdd: InitStub[];
+	/** Provider ids already configured in live-models.json — untouched. */
+	existing: string[];
+	/** models.json provider ids that cannot be adopted (reserved id, or no http(s) baseUrl). */
+	unusable: string[];
+}
+
+/**
+ * Plan a `/live-models-init`: which models.json providers would be added as
+ * `{ baseUrl }` stubs, which are already configured, and which cannot be
+ * adopted. Pure function over its inputs (no fs).
+ */
+export function computeInitPlan(
+	staticProviders: Record<string, StaticProviderRef> | null | undefined,
+	currentProviders: Record<string, unknown> | null | undefined,
+): InitPlan {
+	const plan: InitPlan = { toAdd: [], existing: [], unusable: [] };
+	if (!staticProviders) return plan;
+	for (const [id, entry] of Object.entries(staticProviders)) {
+		if (RESERVED_IDS.has(id)) {
+			plan.unusable.push(id);
+			continue;
+		}
+		if (currentProviders && Object.prototype.hasOwnProperty.call(currentProviders, id)) {
+			plan.existing.push(id);
+			continue;
+		}
+		const baseUrl = optionalString(entry?.baseUrl);
+		if (baseUrl !== undefined && isHttpUrl(baseUrl)) plan.toAdd.push({ id, baseUrl });
+		else plan.unusable.push(id);
+	}
+	return plan;
+}
+
+/**
+ * Merge init stubs into the RAW config object (as JSON.parse'd from
+ * live-models.json), preserving every other field and the original key
+ * order; stubs are appended after existing providers and never overwrite
+ * them. Mutates `raw` in place; the caller persists it. Never throws.
+ */
+export function applyInitToRawConfig(raw: unknown, stubs: ReadonlyArray<InitStub>): { ok: boolean; error?: string } {
+	if (!isPlainObject(raw)) return { ok: false, error: "config root is not an object" };
+	const providers: Record<string, unknown> = isPlainObject(raw.providers) ? raw.providers : {};
+	raw.providers = providers;
+	for (const { id, baseUrl } of stubs) {
+		if (RESERVED_IDS.has(id)) return { ok: false, error: `"${id}" is not a valid provider id` };
+		if (Object.prototype.hasOwnProperty.call(providers, id)) continue; // never overwrite an existing entry (own keys only)
+		providers[id] = { baseUrl };
+	}
+	return { ok: true };
+}
+
 /**
  * Read + parse the config file from disk. Missing file or broken JSON
- * degrades to an empty config with an issue (never throws).
+ * degrades to an empty config with an issue (never throws). Entries that
+ * omit `baseUrl` inherit it from the same-id models.json provider.
  */
 export function loadConfigFile(): { config: LiveModelsConfig; issues: ConfigIssue[]; skipped: string[] } {
 	let raw: unknown;
@@ -455,5 +557,22 @@ export function loadConfigFile(): { config: LiveModelsConfig; issues: ConfigIssu
 		const message = err instanceof Error ? err.message : String(err);
 		return { config: { providers: {} }, issues: [{ field: "(file)", message: `failed to parse ${configPath()}: ${message}` }], skipped: [] };
 	}
-	return parseConfig(raw);
+	return parseConfig(raw, { staticProviders: readStaticProviders() });
+}
+
+/**
+ * Read the models.json `providers` map as a baseUrl-inheritance source.
+ * Returns null when the file is missing, unreadable, or not the expected
+ * shape — inheritance is then simply unavailable. Never throws.
+ */
+export function readStaticProviders(): Record<string, StaticProviderRef> | null {
+	try {
+		const raw: unknown = JSON.parse(fs.readFileSync(modelsJsonPath(), "utf8"));
+		if (!isPlainObject(raw)) return null;
+		const providers = raw.providers;
+		if (!isPlainObject(providers)) return null;
+		return providers as Record<string, StaticProviderRef>;
+	} catch {
+		return null;
+	}
 }

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { loadConfigFile, parseConfig } from "../extensions/config.ts";
+import { applyInitToRawConfig, computeInitPlan, loadConfigFile, parseConfig } from "../extensions/config.ts";
 
 test("minimal valid config parses without issues", () => {
 	const { config, issues, skipped } = parseConfig({ providers: { A: { baseUrl: "https://x.example" } } });
@@ -190,4 +190,137 @@ test("costFromLive / mergeStatic enum validation with graceful degradation", () 
 	assert.equal(config.providers.B.mergeStatic, undefined);
 	assert.ok(issues.some((i) => i.provider === "B" && i.field === "costFromLive"));
 	assert.ok(issues.some((i) => i.provider === "B" && i.field === "mergeStatic"));
+});
+
+test("baseUrl inheritance: omitted baseUrl resolves from staticProviders", () => {
+	const { config, issues, skipped } = parseConfig(
+		{ providers: { GLM: {}, OTHER: { baseUrl: "https://explicit.example" } } },
+		{ staticProviders: { GLM: { baseUrl: "https://relay.example" }, OTHER: { baseUrl: "https://static.example" } } },
+	);
+	assert.deepEqual(skipped, []);
+	assert.deepEqual(issues, []);
+	assert.equal(config.providers.GLM.baseUrl, "https://relay.example");
+	// explicit baseUrl always wins over the same-id models.json provider
+	assert.equal(config.providers.OTHER.baseUrl, "https://explicit.example");
+});
+
+test("baseUrl inheritance: no usable match -> skipped with an inherit hint", () => {
+	const absent = parseConfig({ providers: { A: {} } }, { staticProviders: { B: { baseUrl: "https://x.example" } } });
+	assert.deepEqual(absent.skipped, ["A"]);
+	assert.equal(absent.config.providers.A, undefined);
+	assert.ok(absent.issues.some((i) => i.field === "baseUrl" && i.message.includes("inherit")));
+
+	const unusable = parseConfig({ providers: { A: {} } }, { staticProviders: { A: { baseUrl: "ftp://x" } } });
+	assert.deepEqual(unusable.skipped, ["A"]);
+	assert.ok(unusable.issues.some((i) => i.field === "baseUrl" && i.message.includes("inherit")));
+});
+
+test("baseUrl inheritance: without staticProviders the legacy message is kept", () => {
+	const { issues, skipped } = parseConfig({ providers: { A: { api: "openai-completions" } } });
+	assert.deepEqual(skipped, ["A"]);
+	assert.ok(issues.some((i) => i.field === "baseUrl" && i.message === "providers.A.baseUrl is required — entry skipped"));
+});
+
+test("baseUrl inheritance: present-but-invalid baseUrl never inherits", () => {
+	const { config, issues, skipped } = parseConfig(
+		{ providers: { A: { baseUrl: 123 } } },
+		{ staticProviders: { A: { baseUrl: "https://static.example" } } },
+	);
+	assert.deepEqual(skipped, ["A"]);
+	assert.equal(config.providers.A, undefined);
+	assert.ok(issues.some((i) => i.field === "baseUrl" && i.message.includes("http(s)")));
+});
+
+test("loadConfigFile inherits baseUrl from models.json", () => {
+	const previousDir = process.env.PI_CODING_AGENT_DIR;
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "plm-inherit-"));
+	try {
+		process.env.PI_CODING_AGENT_DIR = tmp;
+		fs.writeFileSync(
+			path.join(tmp, "models.json"),
+			JSON.stringify({ providers: { S: { baseUrl: "https://static.example", apiKey: "sk-test" } } }),
+			"utf8",
+		);
+		fs.writeFileSync(path.join(tmp, "live-models.json"), JSON.stringify({ providers: { S: {} } }), "utf8");
+		const loaded = loadConfigFile();
+		assert.deepEqual(loaded.issues, []);
+		assert.equal(loaded.config.providers.S.baseUrl, "https://static.example");
+	} finally {
+		if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousDir;
+		fs.rmSync(tmp, { recursive: true, force: true });
+	}
+});
+
+test("computeInitPlan categorizes models.json providers", () => {
+	const plan = computeInitPlan(
+		{ A: { baseUrl: "https://a.example" }, B: { baseUrl: "https://b.example" }, C: { baseUrl: "ftp://c" }, D: {} },
+		{ B: { baseUrl: "https://already.configured" } },
+	);
+	assert.deepEqual(plan.toAdd, [{ id: "A", baseUrl: "https://a.example" }]);
+	assert.deepEqual(plan.existing, ["B"]);
+	assert.deepEqual(plan.unusable, ["C", "D"]);
+});
+
+test("computeInitPlan: null/undefined statics -> empty plan; reserved ids unusable", () => {
+	assert.deepEqual(computeInitPlan(null, undefined), { toAdd: [], existing: [], unusable: [] });
+	assert.deepEqual(computeInitPlan(undefined, { A: { baseUrl: "https://x" } }), { toAdd: [], existing: [], unusable: [] });
+	// JSON.parse creates an own __proto__ property; the plan must reject it
+	const statics = JSON.parse('{"__proto__":{"baseUrl":"https://x.example"}}') as Record<string, { baseUrl?: unknown }>;
+	const plan = computeInitPlan(statics, undefined);
+	assert.deepEqual(plan.toAdd, []);
+	assert.deepEqual(plan.unusable, ["__proto__"]);
+});
+
+test("applyInitToRawConfig appends stubs without overwriting or reordering", () => {
+	const raw: Record<string, unknown> = { presets: { p: { exclude: ["x"] } }, providers: { B: { baseUrl: "https://b.example", include: ["glm*"] } } };
+	const res = applyInitToRawConfig(raw, [
+		{ id: "A", baseUrl: "https://a.example" },
+		{ id: "B", baseUrl: "https://overwrite.example" },
+	]);
+	assert.equal(res.ok, true);
+	const providers = raw.providers as Record<string, Record<string, unknown>>;
+	// existing entry untouched (idempotence)
+	assert.deepEqual(providers.B, { baseUrl: "https://b.example", include: ["glm*"] });
+	// stub appended after existing keys; other top-level fields preserved
+	assert.deepEqual(providers.A, { baseUrl: "https://a.example" });
+	assert.deepEqual(Object.keys(providers), ["B", "A"]);
+	assert.deepEqual(raw.presets, { p: { exclude: ["x"] } });
+});
+
+test("applyInitToRawConfig creates providers, rejects bad roots and reserved ids", () => {
+	const fresh: Record<string, unknown> = { defaultFilters: { exclude: ["y"] } };
+	assert.equal(applyInitToRawConfig(fresh, [{ id: "A", baseUrl: "https://a.example" }]).ok, true);
+	assert.deepEqual(fresh.providers, { A: { baseUrl: "https://a.example" } });
+	assert.deepEqual(fresh.defaultFilters, { exclude: ["y"] });
+
+	assert.equal(applyInitToRawConfig("nope" as unknown, []).ok, false);
+	assert.equal(applyInitToRawConfig(null, []).ok, false);
+	const protoAttempt = applyInitToRawConfig({}, [{ id: "__proto__", baseUrl: "https://x.example" }]);
+	assert.equal(protoAttempt.ok, false);
+	assert.equal(({} as Record<string, unknown>).providers, undefined); // nothing leaked onto Object.prototype
+});
+
+test("applyInitToRawConfig agrees with computeInitPlan on inherited-name ids", () => {
+	// "toString" is an inherited (non-own) member of {}: plan adds it, and apply
+	// must write it too (own property) instead of silently skipping it.
+	const plan = computeInitPlan({ toString: { baseUrl: "https://x.example" } }, {});
+	assert.deepEqual(plan.toAdd, [{ id: "toString", baseUrl: "https://x.example" }]);
+	const raw: Record<string, unknown> = {};
+	assert.equal(applyInitToRawConfig(raw, plan.toAdd).ok, true);
+	assert.ok(Object.prototype.hasOwnProperty.call(raw.providers, "toString"));
+	assert.deepEqual((raw.providers as Record<string, unknown>).toString, { baseUrl: "https://x.example" });
+});
+
+test("parseConfig rejects reserved provider ids instead of silently vanishing", () => {
+	// JSON.parse can create an own "__proto__" key inside providers; the old
+	// `config.providers[id] = entry` assignment re-[[Prototype]]d the map and
+	// the provider silently disappeared.
+	const raw = JSON.parse('{"providers":{"__proto__":{"baseUrl":"https://x.example"},"A":{"baseUrl":"https://a.example"}}}');
+	const { config, issues, skipped } = parseConfig(raw);
+	assert.deepEqual(skipped, ["__proto__"]);
+	assert.equal(config.providers.A?.baseUrl, "https://a.example");
+	assert.ok(issues.some((i) => i.provider === "__proto__" && i.message.includes("not a valid provider id")));
+	assert.equal(Object.getPrototypeOf(config.providers), Object.prototype);
+	assert.equal(Object.prototype.hasOwnProperty.call(config.providers, "__proto__"), false);
 });

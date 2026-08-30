@@ -62,7 +62,7 @@ pi install npm:pi-live-models
 pi install git:github.com/wait4xx/pi-live-models
 ```
 
-Then create `~/.pi/agent/live-models.json` (see below) and restart pi.
+Then create `~/.pi/agent/live-models.json` (see below) and restart pi. Already have providers in `models.json`? Run `/live-models-init` in pi — it writes a stub entry for every `models.json` provider (idempotent, existing entries untouched), or just declare ids and let them inherit (below).
 
 ## Quick start
 
@@ -82,9 +82,15 @@ Then create `~/.pi/agent/live-models.json` (see below) and restart pi.
 
 Open `/model` in pi — the list now mirrors `GET https://gw.example.com/v1/models`, minus your excluded patterns. Check status with `/live-models`, tune filters with `/live-models-test MYGATEWAY`.
 
+An entry may omit `baseUrl` to inherit it from the same-id provider in `models.json` (credentials already resolve from `models.json`):
+
+```jsonc
+{ "providers": { "MYGATEWAY": { "filters": { "exclude": ["*embedding*"] } } } }
+```
+
 ## Configuration reference
 
-File: `~/.pi/agent/live-models.json` (respects `$PI_CODING_AGENT_DIR`). Validation is field-precise with graceful degradation: an invalid field is warned and ignored; only entries without a usable `baseUrl` are skipped. Config typos never crash pi startup.
+File: `~/.pi/agent/live-models.json` (respects `$PI_CODING_AGENT_DIR`). Validation is field-precise with graceful degradation: an invalid field is warned and ignored; only entries without a usable `baseUrl` — explicit or inherited from the same-id `models.json` provider — are skipped. Config typos never crash pi startup.
 
 **Top level**
 
@@ -98,7 +104,7 @@ File: `~/.pi/agent/live-models.json` (respects `$PI_CODING_AGENT_DIR`). Validati
 
 | Field | Required | Description |
 |---|---|---|
-| `baseUrl` | ✅ | API root. Models endpoint is derived: ends with a version segment (`/v1`, `/v2`, …) → `{base}/models`, otherwise → `{base}/v1/models`. |
+| `baseUrl` | ✅* | API root. Models endpoint is derived: ends with a version segment (`/v1`, `/v2`, …) → `{base}/models`, otherwise → `{base}/v1/models`. *May be omitted to inherit from the same-id `models.json` provider; a value that is present but invalid is never inherited.* |
 | `modelsUrl` | — | Explicit models-endpoint override when the derivation rule does not fit. |
 | `api` | — | `openai-completions` / `openai-responses` / `anthropic-messages`. Can be omitted when overriding a built-in provider (the definition is inherited). |
 | `name` | — | Display name. |
@@ -219,6 +225,7 @@ Live-only models fall back to `defaults`, then to pi-safe values (`reasoning: tr
 |---|---|
 | `/live-models` | Configured providers, models endpoint, filter summary, last discovery result (`raw -> kept` statistics). |
 | `/live-models-reload` | Re-read the config file and re-register immediately (no restart). |
+| `/live-models-init` | Bootstrap `live-models.json`: write a `{ baseUrl }` stub for every `models.json` provider not yet configured (idempotent, existing entries untouched, broken config files are never clobbered), then re-register immediately. |
 | `/live-models-test <provider>` | Dry-run one discovery: per-model `kept by …` / `dropped by …` annotation plus a metadata preview (context window, cost, input types). |
 | `/live-models-refresh [ids...]` | Force an immediate live refresh, bypassing `refreshIntervalMs` (no argument = all providers). Updates the in-memory catalog and the persisted cache; failures are shown verbatim (no cache fallback for manual actions). |
 | `/live-models-catalog` | Show public-catalog status: both sources (entries, fetch time), merged count, arbitration totals, cache paths. |
