@@ -12,13 +12,13 @@
 <line x1="70.0" y1="483" x2="70.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="72.0" y="509" text-anchor="start" font-size="15" fill="#57606a">2026-08-28</text>
 <line x1="245.0" y1="483" x2="245.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="245.0" y="509" text-anchor="middle" font-size="15" fill="#57606a">2026-08-29</text>
 <line x1="420.0" y1="483" x2="420.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="420.0" y="509" text-anchor="middle" font-size="15" fill="#57606a">2026-08-31</text>
-<line x1="595.0" y1="483" x2="595.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="595.0" y="509" text-anchor="middle" font-size="15" fill="#57606a">2026-09-01</text>
-<line x1="770.0" y1="483" x2="770.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="768.0" y="509" text-anchor="end" font-size="15" fill="#57606a">2026-09-03</text>
+<line x1="595.0" y1="483" x2="595.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="595.0" y="509" text-anchor="middle" font-size="15" fill="#57606a">2026-09-02</text>
+<line x1="770.0" y1="483" x2="770.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="768.0" y="509" text-anchor="end" font-size="15" fill="#57606a">2026-09-04</text>
 <rect x="70" y="60" width="700" height="423" fill="none" stroke="#8b98a5" stroke-width="2" rx="3"/>
-<path d="M 70.0 481.4 Q 186.7 58.6 245.0 198.9 Q 303.3 339.2 361.7 399.8 Q 420.0 460.3 478.3 465.2 Q 536.7 470.1 595.0 473.2 Q 653.3 476.3 711.7 479.0 L 770.0 481.7" fill="none" stroke="#42bb88" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M 70.0 481.4 Q 170.0 58.6 220.0 198.9 Q 270.0 339.2 320.0 399.8 Q 370.0 460.3 420.0 465.2 Q 470.0 470.1 520.0 473.2 Q 570.0 476.3 620.0 479.0 Q 670.0 481.7 720.0 476.5 L 770.0 471.3" fill="none" stroke="#42bb88" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
 <rect x="84" y="72" width="280" height="54" fill="#ffffff" stroke="#8b98a5" stroke-width="1.5" rx="6"/>
 <line x1="96" y1="89" x2="120" y2="89" stroke="#42bb88" stroke-width="3" stroke-linecap="round"/>
 <text x="128" y="94" font-size="15" fill="#1f2328">pi-live-models</text>
-<text x="96" y="114" font-size="13" fill="#57606a">npm downloads/day · since 2026-08-28: 859</text>
+<text x="96" y="114" font-size="13" fill="#57606a">npm downloads/day · since 2026-08-28: 875</text>
 
 </svg>
