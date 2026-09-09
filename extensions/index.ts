@@ -45,6 +45,7 @@ import {
 	loadConfigFile,
 	modelsDevCatalogPath,
 	modelsJsonPath,
+	providerRegistrationConfig,
 	readStaticProviders,
 	type LiveModelsConfig,
 	type ProviderEntry,
@@ -310,11 +311,9 @@ function buildState() {
 function registerAll(pi: ExtensionAPI, state: ExtensionState): void {
 	for (const rt of state.runtimes.values()) {
 		const cfg: Record<string, unknown> = {
-			baseUrl: rt.entry.baseUrl,
+			...providerRegistrationConfig(rt.entry),
 			refreshModels: makeRefreshModels(rt, state),
 		};
-		if (rt.entry.api) cfg.api = rt.entry.api;
-		if (rt.entry.name) cfg.name = rt.entry.name;
 		pi.registerProvider(rt.id, cfg);
 	}
 	pi.log?.(`${LOG} registered ${state.runtimes.size} provider(s): ${[...state.runtimes.keys()].join(", ") || "(none)"}`);

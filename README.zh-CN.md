@@ -87,10 +87,11 @@ pi install git:github.com/wait4xx/pi-live-models
 |---|---|---|
 | `baseUrl` | ✅* | API 根地址。模型端点自动推导：以版本段（`/v1`、`/v2`…）结尾 → `{base}/models`，否则 → `{base}/v1/models`。*可省略，从 `models.json` 同名 provider 继承；显式写了但非法的值绝不继承。* |
 | `modelsUrl` | — | 推导规则不适用时，显式指定模型端点。 |
-| `api` | — | `openai-completions` / `openai-responses` / `anthropic-messages`。覆盖内置 provider 时可省略（继承原定义）。 |
+| `api` | — | `openai-completions` / `openai-responses` / `anthropic-messages`。覆盖内置 provider 时可省略（继承原定义）；同时会转发给 pi 的 provider 注册。 |
 | `name` | — | 显示名。 |
-| `apiKey` | — | 发起发现请求的凭据：`"$ENV"`、`"${ENV}"`、`"!shell 命令"` 或明文。见[凭据链](#凭据链发现请求)。 |
-| `headers` | — | 发现请求的附加头。 |
+| `apiKey` | — | 发现请求**与对话 provider 注册**共用的凭据：`"$ENV"`、`"${ENV}"`、`"!shell 命令"` 或明文。见[凭据链](#凭据链发现请求)。 |
+| `authHeader` | — | `true` 时密钥以裸 `Authorization` 头值发送而非 `Bearer <key>`（对应 pi 的 `authHeader`）。默认 `false`。 |
+| `headers` | — | 附加请求头，发现请求与 pi 的 provider 注册都会带上。 |
 | `timeoutMs` | — | 发现请求超时，默认 `10000`。 |
 | `refreshIntervalMs` | — | 限流：真实请求的最小间隔。`0`（默认）= 每次打开 `/model` 都拉取。 |
 | `compat` | — | provider 级 compat 兜底（如 `{"thinkingFormat":"qwen"}`）。 |
@@ -98,8 +99,8 @@ pi install git:github.com/wait4xx/pi-live-models
 | `costFromLive` | — | live 价格填充策略（OpenRouter 风格 `pricing.*`，$/token → $/1M）：`"fill-zero"`（默认）/ `"always"` / `"off"`。详见[合并阶梯](#元数据合并阶梯低--高)。 |
 | `catalog` | — | `true`（默认）/ `false`——按 provider 退出公共元数据目录。见[公共元数据目录](#公共元数据目录)。 |
 | `mergeStatic` | — | `"live"`（默认）或 `"union"`——把 `models.json`/`models-store.json` 里有、网关列表里没有的静态模型也注册进来。 |
-| `defaults` | — | 全部模型的元数据兜底：`reasoning`、`input`、`contextWindow`、`maxTokens`、`cost`。 |
-| `overrides` | — | 按模型 id 的元数据覆盖：`{"qwen3.8-max":{"contextWindow":1000000}}`。 |
+| `defaults` | — | 全部模型的元数据兜底：`reasoning`、`input`、`contextWindow`、`maxTokens`、`cost`、`thinkingLevelMap`、`samplingParams`。 |
+| `overrides` | — | 按模型 id 的元数据覆盖：`{"qwen3.8-max":{"contextWindow":1000000,"thinkingLevelMap":{"off":null,"high":"max"}}}`。 |
 
 ### 过滤器
 
@@ -199,6 +200,17 @@ live 值必须先过合理性窗口才能赢得所在层：上下文整数 1,024
 `mergeStatic: "union"` 会额外注册存在于 `models.json`/`models-store.json` 但网关列表缺失的模型（走同一套过滤，静态定义充当 `*By` 规则的字段源）。**live 返回 0 模型仍然抛错**——union 是补充，绝不给坏网关打掩护。
 
 仅 live 有的模型回退到 `defaults`，再回退到 pi 安全值（`reasoning: true`、`input: ["text"]`、`contextWindow: 128000`、`maxTokens: 32768`、零成本）。
+
+### 字段透传：live 模型从 `models.json` 继承什么
+
+live 发现会**替换**掉 pi 从 `models.json` 合成的模型列表，因此重建时必须带上 pi 自己合成器会合并的字段。0.3.4 起，有同 id 静态定义（或经 provider 级提升）的 live 模型会按既有阶梯（`defaults` < static < `overrides`）继承：
+
+- `api` —— 含 `models.json` **provider 级** `api`（逐模型提升，模型级优先）。此前未显式写 `entry.api` 的 live 模型可能静默回退到 pi 默认 api。
+- `compat` —— 含 `models.json` **provider 级** `compat`（提升并合并，模型级优先）。此前对重建模型直接丢弃——`thinkingFormat: "zai"`/`"qwen"` 网关会丢掉格式提示。
+- `thinkingLevelMap` —— 此前完全丢失：xhigh/max 变为不可用、`off` 失效。`models.json` 里的静态映射（如 reasoning-effort 网关）现在能活过发现流程。
+- `samplingParams` —— 此前丢失。
+
+provider 注册现在还会把条目的 `apiKey` / `headers` / `authHeader` 转发给 pi（与发现请求同一套值），而不再只传 `baseUrl`/`api`/`name`。
 
 ## 命令
 

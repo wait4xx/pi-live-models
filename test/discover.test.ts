@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildCatalog, buildModelsUrl, buildModel, envKeyVarName, liveCostFrom, liveNumber, resolveKeySpec } from "../extensions/discover.ts";
+import { buildCatalog, buildModelsUrl, buildModel, envKeyVarName, hoistProviderFields, liveCostFrom, liveNumber, resolveKeySpec } from "../extensions/discover.ts";
 import { compileFilters } from "../extensions/filters.ts";
 import type { ProviderEntry } from "../extensions/config.ts";
 
@@ -181,4 +181,73 @@ test("buildCatalog: includeBy fields apply to live items during catalog build", 
 	);
 	assert.deepEqual(result.liveModels.map((m) => m.id), ["m-1"]);
 	assert.equal(result.outcomes.find((o) => o.id === "m-3")!.reason, "includeBy-miss:owned_by");
+});
+
+test("buildModel carries thinkingLevelMap: defaults < static < overrides, absent when unset", () => {
+	const staticMap = { off: null, low: "low", high: "max" };
+	const overrideMap = { off: null, low: "low" };
+
+	// absent everywhere -> field omitted
+	const none = buildModel("m", undefined, {}, undefined);
+	assert.equal("thinkingLevelMap" in none, false);
+
+	// entry.defaults only
+	const viaDefaults = buildModel("m", undefined, { defaults: { thinkingLevelMap: staticMap } }, undefined);
+	assert.deepEqual(viaDefaults.thinkingLevelMap, staticMap);
+
+	// static base beats defaults
+	const viaBase = buildModel(
+		"m",
+		undefined,
+		{ defaults: { thinkingLevelMap: { low: "defaults" } } },
+		{ thinkingLevelMap: staticMap },
+	);
+	assert.deepEqual(viaBase.thinkingLevelMap, staticMap);
+
+	// overrides beat static
+	const viaOverride = buildModel("m", undefined, { overrides: { m: { thinkingLevelMap: overrideMap } } }, { thinkingLevelMap: staticMap });
+	assert.deepEqual(viaOverride.thinkingLevelMap, overrideMap);
+});
+
+test("buildModel carries samplingParams: defaults < static < overrides, absent when unset", () => {
+	const staticParams = { temperature: 0.7 };
+	const overrideParams = { temperature: 0.2, top_p: 0.9 };
+
+	const none = buildModel("m", undefined, {}, undefined);
+	assert.equal("samplingParams" in none, false);
+
+	const viaDefaults = buildModel("m", undefined, { defaults: { samplingParams: staticParams } }, undefined);
+	assert.deepEqual(viaDefaults.samplingParams, staticParams);
+
+	const viaBase = buildModel("m", undefined, {}, { samplingParams: staticParams });
+	assert.deepEqual(viaBase.samplingParams, staticParams);
+
+	const viaOverride = buildModel("m", undefined, { overrides: { m: { samplingParams: overrideParams } } }, { samplingParams: staticParams });
+	assert.deepEqual(viaOverride.samplingParams, overrideParams);
+});
+
+test("hoistProviderFields merges provider-level api/compat into static models, model level wins", () => {
+	const provider = { api: "openai-completions", compat: { thinkingFormat: "zai", supportsReasoningEffort: true } };
+
+	// both hoisted when the model has neither
+	const hoisted = hoistProviderFields({ id: "glm-5.3" }, provider);
+	assert.equal(hoisted.api, "openai-completions");
+	assert.deepEqual(hoisted.compat, provider.compat);
+
+	// model-level api/compat win over provider level
+	const kept = hoistProviderFields(
+		{ id: "glm-5.3", api: "anthropic-messages", compat: { thinkingFormat: "zai" } },
+		provider,
+	);
+	assert.equal(kept.api, "anthropic-messages");
+	assert.deepEqual(kept.compat, { thinkingFormat: "zai", supportsReasoningEffort: true });
+
+	// no provider entry / no provider fields -> model untouched
+	assert.deepEqual(hoistProviderFields({ id: "m" }, undefined), { id: "m" });
+	assert.deepEqual(hoistProviderFields({ id: "m" }, { api: 42, compat: "nope" }), { id: "m" });
+
+	// original model object is never mutated
+	const original = { id: "m" };
+	hoistProviderFields(original, provider);
+	assert.deepEqual(original, { id: "m" });
 });

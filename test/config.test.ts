@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { applyInitToRawConfig, computeInitPlan, loadConfigFile, parseConfig } from "../extensions/config.ts";
+import { applyInitToRawConfig, computeInitPlan, loadConfigFile, parseConfig, providerRegistrationConfig } from "../extensions/config.ts";
 
 test("minimal valid config parses without issues", () => {
 	const { config, issues, skipped } = parseConfig({ providers: { A: { baseUrl: "https://x.example" } } });
@@ -323,4 +323,38 @@ test("parseConfig rejects reserved provider ids instead of silently vanishing", 
 	assert.ok(issues.some((i) => i.provider === "__proto__" && i.message.includes("not a valid provider id")));
 	assert.equal(Object.getPrototypeOf(config.providers), Object.prototype);
 	assert.equal(Object.prototype.hasOwnProperty.call(config.providers, "__proto__"), false);
+});
+
+test("parseConfig accepts authHeader boolean, rejects non-boolean with an issue", () => {
+	const { config, issues } = parseConfig({
+		providers: {
+			A: { baseUrl: "https://a.example", authHeader: true },
+			B: { baseUrl: "https://b.example", authHeader: "yes" },
+		},
+	});
+	assert.equal(config.providers.A.authHeader, true);
+	assert.equal(config.providers.B.authHeader, undefined);
+	assert.ok(issues.some((i) => i.provider === "B" && i.field === "authHeader"));
+});
+
+test("providerRegistrationConfig forwards every provider-level field pi composes, omitting undefined", () => {
+	const full = providerRegistrationConfig({
+		baseUrl: "https://a.example/v1",
+		api: "openai-completions",
+		name: "Relay A",
+		apiKey: "$RELAY_A_KEY",
+		headers: { "X-Extra": "1" },
+		authHeader: true,
+	});
+	assert.deepEqual(full, {
+		baseUrl: "https://a.example/v1",
+		api: "openai-completions",
+		name: "Relay A",
+		apiKey: "$RELAY_A_KEY",
+		headers: { "X-Extra": "1" },
+		authHeader: true,
+	});
+
+	const minimal = providerRegistrationConfig({ baseUrl: "https://b.example" });
+	assert.deepEqual(minimal, { baseUrl: "https://b.example" });
 });

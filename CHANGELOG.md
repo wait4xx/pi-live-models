@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.3.4] - 2026-09-09
+
+Field passthrough: stop losing `models.json` config on live-discovered models.
+
+### Fixed
+
+- **`thinkingLevelMap` was dropped from every live-discovered model** — `buildModel` assembled a fixed field whitelist and pi composes replacement lists, so static `models.json` maps never survived discovery. Effect: `xhigh`/`max` became unavailable (silently clamped to `high`), `off` misbehaved on models that map it to `null`. Now carried on the usual ladder: `entry.defaults` < static definition (`models.json` / `models-store.json`, by id) < `entry.overrides[id]`.
+- **`samplingParams` was dropped** the same way — now carried on the same ladder.
+- **Provider-level `api`/`compat` in `models.json` never reached rebuilt models** (pi's composer merges provider `compat` only into its own static models). `collectStaticById` now hoists provider-level `api`/`compat` into each static `models.json` model entry (model-level values win), so live models with matching ids inherit them through the existing pick chain. This also fixes `mergeStatic: "union"` static-only models that relied on provider-level `api`.
+- **Provider registration dropped auth fields** — `registerProvider` now also receives entry `apiKey`, `headers`, and the new `authHeader` (pi's `composeApiKeyAuth`/`configuredHeaders` support them; previously only `baseUrl`/`api`/`name` were forwarded, forcing credentials to be re-resolved via `/login` or env even when the entry already had them).
+
+### Added
+
+- `authHeader` provider-entry field (boolean, default `false`): send the key as a bare `Authorization` header value instead of `Bearer <key>`.
+- `thinkingLevelMap` / `samplingParams` in `defaults` and per-id `overrides`.
+- `providerRegistrationConfig(entry)` exported from `config.ts` — the pure field-forwarding contract behind registration, unit-tested.
+
+## [0.3.3] - 2026-08-30
 ## [0.3.3] - 2026-08-30
 
 Bootstrap UX: stop re-typing what `models.json` already knows.

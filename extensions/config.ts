@@ -20,6 +20,10 @@ export interface ModelDefaults {
 	contextWindow?: number;
 	maxTokens?: number;
 	cost?: Record<string, number>;
+	/** pi thinking-level -> provider effort string (or null = level unavailable). Applied to every model unless overridden per id. */
+	thinkingLevelMap?: Record<string, string | null>;
+	/** Extra sampling params merged into requests (pi model-level `samplingParams`). */
+	samplingParams?: Record<string, unknown>;
 }
 
 export interface ModelOverride extends ModelDefaults {
@@ -65,6 +69,8 @@ export interface ProviderEntry {
 	modelsUrl?: string;
 	api?: string;
 	apiKey?: string;
+	/** Send the key as a bare `Authorization` header value instead of `Bearer <key>`. Default false (pi's default). */
+	authHeader?: boolean;
 	headers?: Record<string, string>;
 	/** Fetch timeout for discovery requests, ms. Default 10000. */
 	timeoutMs?: number;
@@ -395,6 +401,12 @@ export function parseConfig(
 			else entry.headers = headers;
 		}
 
+		// authHeader (forwarded to pi's provider registration)
+		if (entryRaw.authHeader !== undefined) {
+			if (typeof entryRaw.authHeader === "boolean") entry.authHeader = entryRaw.authHeader;
+			else issues.push({ provider: id, field: "authHeader", message: `providers.${id}.authHeader must be a boolean — ignored` });
+		}
+
 		// numeric knobs
 		if (entryRaw.timeoutMs !== undefined) {
 			const timeoutMs = optionalPositiveNumber(entryRaw.timeoutMs);
@@ -455,6 +467,22 @@ export interface FixPatch {
  * live-models.json), preserving every other field and the original key order.
  * Mutates `raw` in place; the caller persists it. Never throws.
  */
+/**
+ * Build the provider registration config handed to pi's `registerProvider`:
+ * everything the extension knows that pi's provider composer understands
+ * (baseUrl/api/name/apiKey/headers/authHeader). Pure — kept here so the
+ * field-forwarding contract is unit-testable without an ExtensionAPI.
+ */
+export function providerRegistrationConfig(entry: ProviderEntry): Record<string, unknown> {
+	const cfg: Record<string, unknown> = { baseUrl: entry.baseUrl };
+	if (entry.api !== undefined) cfg.api = entry.api;
+	if (entry.name !== undefined) cfg.name = entry.name;
+	if (entry.apiKey !== undefined) cfg.apiKey = entry.apiKey;
+	if (entry.headers !== undefined) cfg.headers = entry.headers;
+	if (entry.authHeader !== undefined) cfg.authHeader = entry.authHeader;
+	return cfg;
+}
+
 export function applyFixToRawConfig(
 	raw: unknown,
 	providerId: string,

@@ -32,6 +32,10 @@ export interface ModelDef {
 	cost: Record<string, number>;
 	compat?: Record<string, unknown>;
 	api?: string;
+	/** pi thinking-level -> provider effort string (or null = level unavailable). Inherited from static definitions when not overridden. */
+	thinkingLevelMap?: Record<string, string | null>;
+	/** Extra sampling params (pi model-level `samplingParams`). Inherited from static definitions when not overridden. */
+	samplingParams?: Record<string, unknown>;
 	/** Where contextWindow came from — surfaced by /live-models-test. */
 	ctxSource?: MetaSource;
 	/** Where maxTokens came from — surfaced by /live-models-test. */
@@ -122,13 +126,35 @@ export function collectStaticById(providerId: string): Record<string, Record<str
 		}
 	}
 	const modelsJson = readJsonSafe(modelsJsonPath());
-	const jsonModels = (modelsJson?.providers as Record<string, { models?: unknown[] }> | undefined)?.[providerId]?.models;
+	const staticProvider = (modelsJson?.providers as Record<string, Record<string, unknown>> | undefined)?.[providerId];
+	const jsonModels = (staticProvider as { models?: unknown[] } | undefined)?.models;
 	for (const m of Array.isArray(jsonModels) ? jsonModels : []) {
 		if (m && typeof m === "object" && typeof (m as { id?: unknown }).id === "string") {
-			byId[(m as { id: string }).id] = m as Record<string, unknown>;
+			// Hoist models.json provider-level `api`/`compat` into the static entry
+			// (model-level values win). pi's own composer merges provider compat
+			// only into static models — extension-rebuilt live models would
+			// otherwise silently lose both fields.
+			byId[(m as { id: string }).id] = hoistProviderFields(m as Record<string, unknown>, staticProvider);
 		}
 	}
 	return byId;
+}
+
+/** Merge provider-level `api`/`compat` into a static models.json model entry; model-level values win. Exported for tests. */
+export function hoistProviderFields(model: Record<string, unknown>, provider: Record<string, unknown> | undefined): Record<string, unknown> {
+	if (!provider) return model;
+	const hoisted: Record<string, unknown> = { ...model };
+	if (hoisted.api === undefined && typeof provider.api === "string") hoisted.api = provider.api;
+	if (isPlainObject(provider.compat)) {
+		hoisted.compat = isPlainObject(hoisted.compat)
+			? { ...provider.compat, ...hoisted.compat }
+			: { ...provider.compat };
+	}
+	return hoisted;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function pick<T>(...values: unknown[]): T | undefined {
@@ -270,6 +296,25 @@ export function buildModel(
 
 	const api = pick<string>(override.api, base?.api as string | undefined, entry.api);
 	if (api) model.api = api;
+
+	// thinkingLevelMap / samplingParams ride the same ladder as compat:
+	// entry.defaults < static definition (models.json / models-store.json, by id)
+	// < entry.overrides[id]. Without this, live-discovered models silently lose
+	// the thinking-level mapping pi needs to translate its thinking levels
+	// into provider effort strings (xhigh/max become unavailable, off breaks).
+	const thinkingLevelMap = pick<Record<string, string | null>>(
+		override.thinkingLevelMap,
+		base?.thinkingLevelMap as Record<string, string | null> | undefined,
+		defaults.thinkingLevelMap,
+	);
+	if (thinkingLevelMap) model.thinkingLevelMap = thinkingLevelMap;
+
+	const samplingParams = pick<Record<string, unknown>>(
+		override.samplingParams,
+		base?.samplingParams as Record<string, unknown> | undefined,
+		defaults.samplingParams,
+	);
+	if (samplingParams) model.samplingParams = samplingParams;
 
 	return model;
 }

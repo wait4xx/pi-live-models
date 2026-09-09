@@ -106,10 +106,11 @@ File: `~/.pi/agent/live-models.json` (respects `$PI_CODING_AGENT_DIR`). Validati
 |---|---|---|
 | `baseUrl` | ✅* | API root. Models endpoint is derived: ends with a version segment (`/v1`, `/v2`, …) → `{base}/models`, otherwise → `{base}/v1/models`. *May be omitted to inherit from the same-id `models.json` provider; a value that is present but invalid is never inherited.* |
 | `modelsUrl` | — | Explicit models-endpoint override when the derivation rule does not fit. |
-| `api` | — | `openai-completions` / `openai-responses` / `anthropic-messages`. Can be omitted when overriding a built-in provider (the definition is inherited). |
+| `api` | — | `openai-completions` / `openai-responses` / `anthropic-messages`. Can be omitted when overriding a built-in provider (the definition is inherited). Also forwarded to pi's provider registration. |
 | `name` | — | Display name. |
-| `apiKey` | — | Credential for the discovery request: `"$ENV"`, `"${ENV}"`, `"!shell command"`, or literal. See [Auth chain](#auth-chain-discovery-request). |
-| `headers` | — | Extra request headers for the discovery request. |
+| `apiKey` | — | Credential for the discovery request **and the chat provider registration**: `"$ENV"`, `"${ENV}"`, `"!shell command"`, or literal. See [Auth chain](#auth-chain-discovery-request). |
+| `authHeader` | — | `true` sends the key as a bare `Authorization` header value instead of `Bearer <key>` (pi's `authHeader`). Default `false`. |
+| `headers` | — | Extra request headers, applied to both the discovery request and pi's provider registration. |
 | `timeoutMs` | — | Discovery fetch timeout, default `10000`. |
 | `refreshIntervalMs` | — | Throttle real fetches to at most one per interval. `0` (default) = fetch on every `/model` open. |
 | `compat` | — | Provider-level compat fallback for models without one (e.g. `{"thinkingFormat":"qwen"}`). |
@@ -117,8 +118,8 @@ File: `~/.pi/agent/live-models.json` (respects `$PI_CODING_AGENT_DIR`). Validati
 | `costFromLive` | — | Live pricing fill strategy (OpenRouter-style `pricing.*`, $/token → $/1M): `"fill-zero"` (default) / `"always"` / `"off"`. Details in the [merge ladder](#metadata-merge-ladder-low--high). |
 | `catalog` | — | `true` (default) / `false` — opt out of the public metadata catalog for this provider. See [Public metadata catalog](#public-metadata-catalog). |
 | `mergeStatic` | — | `"live"` (default) or `"union"` — also register static-only models from `models.json`/`models-store.json`. |
-| `defaults` | — | Metadata fallback for all models: `reasoning`, `input`, `contextWindow`, `maxTokens`, `cost`. |
-| `overrides` | — | Per-model-id metadata overrides: `{"qwen3.8-max":{"contextWindow":1000000}}`. |
+| `defaults` | — | Metadata fallback for all models: `reasoning`, `input`, `contextWindow`, `maxTokens`, `cost`, `thinkingLevelMap`, `samplingParams`. |
+| `overrides` | — | Per-model-id metadata overrides: `{"qwen3.8-max":{"contextWindow":1000000,"thinkingLevelMap":{"off":null,"high":"max"}}}`. |
 
 ### Filters
 
@@ -218,6 +219,17 @@ Explicit `"0"` (free tier) is a valid live cost; strict decimal strings only.
 `mergeStatic: "union"` additionally registers models that exist in `models.json`/`models-store.json` but are missing from the gateway's live list (same filters apply, static def acts as the field source for `*By` rules). A zero-model **live** result still throws — union supplements, never papers over a broken gateway.
 
 Live-only models fall back to `defaults`, then to pi-safe values (`reasoning: true`, `input: ["text"]`, `contextWindow: 128000`, `maxTokens: 32768`, zero cost).
+
+### Field passthrough: what live models inherit from `models.json`
+
+Live discovery **replaces** the model list pi composed from `models.json`, so the rebuild must carry the fields pi's own composer would have merged. Since 0.3.4 a live model with a same-id static definition (or via provider-level hoisting) inherits, on the usual ladder (`defaults` < static < `overrides`):
+
+- `api` — incl. **provider-level** `api` from `models.json` (hoisted per model, model-level wins). Previously a live model without an explicit `entry.api` could silently fall back to pi's default api.
+- `compat` — incl. **provider-level** `compat` from `models.json` (hoisted and merged, model-level wins). Previously dropped for rebuilt models — `thinkingFormat: "zai"`/`"qwen"` gateways lost their format hints.
+- `thinkingLevelMap` — previously dropped entirely: xhigh/max became unavailable, `off` broke. Static `models.json` maps (e.g. for reasoning-effort gateways) now survive discovery.
+- `samplingParams` — previously dropped.
+
+The provider registration now also forwards entry `apiKey` / `headers` / `authHeader` to pi (same values the discovery request uses), instead of only `baseUrl`/`api`/`name`.
 
 ## Commands
 
