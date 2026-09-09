@@ -224,8 +224,8 @@ Live-only models fall back to `defaults`, then to pi-safe values (`reasoning: tr
 
 Live discovery **replaces** the model list pi composed from `models.json`, so the rebuild must carry the fields pi's own composer would have merged. Since 0.3.4 a live model with a same-id static definition (or via provider-level hoisting) inherits, on the usual ladder (`defaults` < static < `overrides`):
 
-- `api` — incl. **provider-level** `api` from `models.json` (hoisted per model, model-level wins). Previously a live model without an explicit `entry.api` could silently fall back to pi's default api.
-- `compat` — incl. **provider-level** `compat` from `models.json` (hoisted and merged, model-level wins). Previously dropped for rebuilt models — `thinkingFormat: "zai"`/`"qwen"` gateways lost their format hints.
+- `api` — incl. **provider-level** `api` from `models.json` (hoisted per model into both `models.json` and `models-store.json` static entries, model-level wins). Previously a live model without an explicit `entry.api` could silently fall back to pi's default api.
+- `compat` — incl. **provider-level** `compat` from `models.json` (hoisted and merged into both static sources, model-level wins). Previously dropped for rebuilt models — `thinkingFormat: "zai"`/`"qwen"` gateways lost their format hints.
 - `thinkingLevelMap` — previously dropped entirely: xhigh/max became unavailable, `off` broke. Static `models.json` maps (e.g. for reasoning-effort gateways) now survive discovery.
 - `samplingParams` — previously dropped.
 
@@ -235,6 +235,7 @@ Two semantic notes:
 
 - **Auth spec resolution differs by path**: chat requests resolve the forwarded spec with pi's native resolver (embedded `$VAR` interpolation, `$$`/`$!` escapes supported); the discovery request uses the extension's simpler whole-string forms (`"$ENV"`, `"${ENV}"`, `"!command"`, literal). Prefer whole-string specs in the entry.
 - **You cannot delete an inherited field with a top-level `null`** (the ladder treats `null` as "unset"). To make a single thinking level unavailable, set that level's key to `null` *inside* `thinkingLevelMap` — that is its documented meaning in pi.
+- **Extension `overrides` replace the whole table**: unlike pi's `models.json` `modelOverrides` (which merge `thinkingLevelMap`/`samplingParams` key by key), this extension's `overrides[id]` swap the entire object — write the full table, not just the changed keys.
 
 ## Commands
 
@@ -293,7 +294,7 @@ Two semantic notes:
 "qwen-token-plan-cn": {
   "baseUrl": "https://token-plan.example.com/compatible-mode/v1",
   "api": "openai-completions",
-  "exclude": ["qwen-audio-*", "wan*"],
+  "filters": { "exclude": ["qwen-audio-*", "wan*"] },
   "compat": { "thinkingFormat": "qwen", "supportsDeveloperRole": false }
 }
 ```
@@ -347,7 +348,7 @@ Thank you to both teams and their contributors. This extension is an independent
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # node:test via tsx (77 tests)
+npm test            # node:test via tsx
 npm run smoke       # register against the real config (no TUI)
 npx tsx scripts/smoke.ts GLM   # + one live refreshModels pass for GLM
 ```

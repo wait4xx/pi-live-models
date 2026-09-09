@@ -463,11 +463,6 @@ export interface FixPatch {
 }
 
 /**
- * Apply an override patch to the RAW config object (as JSON.parse'd from
- * live-models.json), preserving every other field and the original key order.
- * Mutates `raw` in place; the caller persists it. Never throws.
- */
-/**
  * Build the provider registration config handed to pi's `registerProvider`:
  * everything the extension knows that pi's provider composer understands
  * (baseUrl/api/name/apiKey/headers/authHeader). Pure — kept here so the
@@ -483,6 +478,11 @@ export function providerRegistrationConfig(entry: ProviderEntry): Record<string,
 	return cfg;
 }
 
+/**
+ * Apply an override patch to the RAW config object (as JSON.parse'd from
+ * live-models.json), preserving every other field and the original key order.
+ * Mutates `raw` in place; the caller persists it. Never throws.
+ */
 export function applyFixToRawConfig(
 	raw: unknown,
 	providerId: string,

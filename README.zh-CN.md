@@ -205,8 +205,8 @@ live 值必须先过合理性窗口才能赢得所在层：上下文整数 1,024
 
 live 发现会**替换**掉 pi 从 `models.json` 合成的模型列表，因此重建时必须带上 pi 自己合成器会合并的字段。0.3.4 起，有同 id 静态定义（或经 provider 级提升）的 live 模型会按既有阶梯（`defaults` < static < `overrides`）继承：
 
-- `api` —— 含 `models.json` **provider 级** `api`（逐模型提升，模型级优先）。此前未显式写 `entry.api` 的 live 模型可能静默回退到 pi 默认 api。
-- `compat` —— 含 `models.json` **provider 级** `compat`（提升并合并，模型级优先）。此前对重建模型直接丢弃——`thinkingFormat: "zai"`/`"qwen"` 网关会丢掉格式提示。
+- `api` —— 含 `models.json` **provider 级** `api`（逐模型提升到 `models.json` 与 `models-store.json` 两个静态源，模型级优先）。此前未显式写 `entry.api` 的 live 模型可能静默回退到 pi 默认 api。
+- `compat` —— 含 `models.json` **provider 级** `compat`（提升并合并到两个静态源，模型级优先）。此前对重建模型直接丢弃——`thinkingFormat: "zai"`/`"qwen"` 网关会丢掉格式提示。
 - `thinkingLevelMap` —— 此前完全丢失：xhigh/max 变为不可用、`off` 失效。`models.json` 里的静态映射（如 reasoning-effort 网关）现在能活过发现流程。
 - `samplingParams` —— 此前丢失。
 
@@ -214,8 +214,9 @@ provider 注册现在还会把条目的 `apiKey` / `headers` / `authHeader` 转�
 
 两条语义注记：
 
-- **凭据 spec 的解析图路径不同**：对话请求用 pi 原生解析器处理转发的 spec（支持内嵌 `$VAR` 插值、`$$`/`$!` 转义）；发现请求用扩展自己的整串形式（`"$ENV"`、`"${ENV}"`、`"!命令"`、明文）。条目里建议用整串形式。
+- **凭据 spec 的解析路径不同**：对话请求用 pi 原生解析器处理转发的 spec（支持内嵌 `$VAR` 插值、`$$`/`$!` 转义）；发现请求用扩展自己的整串形式（`"$ENV"`、`"${ENV}"`、`"!命令"`、明文）。条目里建议用整串形式。
 - **顶层 `null` 不能删除继承到的字段**（阶梯把 `null` 视为未设置）。若只想禁用某个思考档，把 `thinkingLevelMap` 内部对应档位的键设为 `null`——那才是它在 pi 里的文档化含义。
+- **扩展的 `overrides` 是整表替换**：与 pi `models.json` 的 `modelOverrides`（对 `thinkingLevelMap`/`samplingParams` 按键合并）不同，本扩展的 `overrides[id]` 会替换整个对象——要写完整表，而不是只写变更的键。
 
 ## 命令
 
@@ -274,7 +275,7 @@ provider 注册现在还会把条目的 `apiKey` / `headers` / `authHeader` 转�
 "qwen-token-plan-cn": {
   "baseUrl": "https://token-plan.example.com/compatible-mode/v1",
   "api": "openai-completions",
-  "exclude": ["qwen-audio-*", "wan*"],
+  "filters": { "exclude": ["qwen-audio-*", "wan*"] },
   "compat": { "thinkingFormat": "qwen", "supportsDeveloperRole": false }
 }
 ```
@@ -328,7 +329,7 @@ provider 注册现在还会把条目的 `apiKey` / `headers` / `authHeader` 转�
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # node:test via tsx（77 个用例）
+npm test            # node:test via tsx
 npm run smoke       # 对真实配置注册（不进 TUI）
 npx tsx scripts/smoke.ts GLM   # + GLM 真实刷新一轮
 ```

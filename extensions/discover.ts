@@ -121,8 +121,11 @@ export function collectStaticById(providerId: string): Record<string, Record<str
 	const modelsJson = readJsonSafe(modelsJsonPath());
 	const staticProvider = (modelsJson?.providers as Record<string, Record<string, unknown>> | undefined)?.[providerId];
 	// Provider-level api/compat from models.json apply to BOTH static sources
-	// (store snapshots and models.json models) — same per-key merge semantics
-	// pi's own composer uses for base models. Model-level values always win.
+	// (store snapshots and models.json models). Store snapshots are raw
+	// pre-composition definitions, so we use model-level-wins semantics — the
+	// same as pi's modelFromJson path for custom model definitions (pi's base-model
+	// path mergeCompat is provider-wins per key; these snapshots are not base
+	// models, and provider compat only fills keys the entry itself lacks).
 	const hoist = (m: Record<string, unknown>): Record<string, unknown> => hoistProviderFields(m, staticProvider);
 	const store = readJsonSafe(modelsStorePath());
 	const storeModels = (store?.[providerId] as { models?: unknown[] } | undefined)?.models;

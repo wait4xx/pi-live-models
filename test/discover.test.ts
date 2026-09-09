@@ -1,6 +1,9 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildCatalog, buildModelsUrl, buildModel, envKeyVarName, hoistProviderFields, liveCostFrom, liveNumber, resolveKeySpec } from "../extensions/discover.ts";
+import { buildCatalog, buildModelsUrl, buildModel, collectStaticById, envKeyVarName, hoistProviderFields, liveCostFrom, liveNumber, resolveKeySpec } from "../extensions/discover.ts";
 import { compileFilters } from "../extensions/filters.ts";
 import type { ProviderEntry } from "../extensions/config.ts";
 
@@ -263,4 +266,52 @@ test("hoistProviderFields deep-merges pi's special compat keys, one level", () =
 	// non-object values on either side keep per-key override semantics
 	const hoisted2 = hoistProviderFields({ compat: { chatTemplateKwargs: "flat" } }, provider);
 	assert.deepEqual(hoisted2.compat, { openRouterRouting: { provider: { order: ["A"] } }, chatTemplateKwargs: "flat" });
+});
+
+test("collectStaticById hoists provider fields into both static sources, models.json wins on id clashes", () => {
+	const previousDir = process.env.PI_CODING_AGENT_DIR;
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "plm-static-"));
+	try {
+		process.env.PI_CODING_AGENT_DIR = tmp;
+		fs.writeFileSync(path.join(tmp, "models.json"), JSON.stringify({
+			providers: {
+				DEMO: {
+					api: "openai-completions",
+					compat: { thinkingFormat: "zai", supportsReasoningEffort: true },
+					models: [
+						{ id: "m-json", name: "From models.json", compat: { thinkingFormat: "zai" } },
+						{ id: "m-both", name: "models.json version" },
+					],
+				},
+			},
+		}), "utf8");
+		fs.writeFileSync(path.join(tmp, "models-store.json"), JSON.stringify({
+			DEMO: { models: [
+				{ id: "m-store", name: "From store" },
+				{ id: "m-both", name: "store version" },
+				{ id: 42 },
+			] },
+		}), "utf8");
+
+		const byId = collectStaticById("DEMO");
+
+		// store-only id: provider-level api/compat hoisted in
+		assert.equal(byId["m-store"].api, "openai-completions");
+		assert.deepEqual(byId["m-store"].compat, { thinkingFormat: "zai", supportsReasoningEffort: true });
+
+		// models.json model: api hoisted, model-level compat beats provider level per key,
+		// provider fills keys the model compat lacks
+		assert.equal(byId["m-json"].api, "openai-completions");
+		assert.deepEqual(byId["m-json"].compat, { thinkingFormat: "zai", supportsReasoningEffort: true });
+
+		// same id in both: models.json entry wins over the store snapshot
+		assert.equal(byId["m-both"].name, "models.json version");
+		assert.equal(byId["m-both"].api, "openai-completions");
+
+		// non-string ids never enter the map
+		assert.equal(Object.keys(byId).length, 3);
+	} finally {
+		process.env.PI_CODING_AGENT_DIR = previousDir;
+		fs.rmSync(tmp, { recursive: true, force: true });
+	}
 });
