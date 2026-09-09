@@ -90,7 +90,7 @@ pi install git:github.com/wait4xx/pi-live-models
 | `api` | — | `openai-completions` / `openai-responses` / `anthropic-messages`。覆盖内置 provider 时可省略（继承原定义）；同时会转发给 pi 的 provider 注册。 |
 | `name` | — | 显示名。 |
 | `apiKey` | — | 发现请求**与对话 provider 注册**共用的凭据：`"$ENV"`、`"${ENV}"`、`"!shell 命令"` 或明文。见[凭据链](#凭据链发现请求)。 |
-| `authHeader` | — | `true` 时密钥以裸 `Authorization` 头值发送而非 `Bearer <key>`（对应 pi 的 `authHeader`）。默认 `false`。 |
+| `authHeader` | — | `true` 时强制在每个对话请求上加 `Authorization: Bearer <key>` 头（对应 pi 的 `authHeader`——用于常规认证流程不会携带该头的网关）。默认 `false`。 |
 | `headers` | — | 附加请求头，发现请求与 pi 的 provider 注册都会带上。 |
 | `timeoutMs` | — | 发现请求超时，默认 `10000`。 |
 | `refreshIntervalMs` | — | 限流：真实请求的最小间隔。`0`（默认）= 每次打开 `/model` 都拉取。 |
@@ -211,6 +211,11 @@ live 发现会**替换**掉 pi 从 `models.json` 合成的模型列表，因此�
 - `samplingParams` —— 此前丢失。
 
 provider 注册现在还会把条目的 `apiKey` / `headers` / `authHeader` 转发给 pi（与发现请求同一套值），而不再只传 `baseUrl`/`api`/`name`。
+
+两条语义注记：
+
+- **凭据 spec 的解析图路径不同**：对话请求用 pi 原生解析器处理转发的 spec（支持内嵌 `$VAR` 插值、`$$`/`$!` 转义）；发现请求用扩展自己的整串形式（`"$ENV"`、`"${ENV}"`、`"!命令"`、明文）。条目里建议用整串形式。
+- **顶层 `null` 不能删除继承到的字段**（阶梯把 `null` 视为未设置）。若只想禁用某个思考档，把 `thinkingLevelMap` 内部对应档位的键设为 `null`——那才是它在 pi 里的文档化含义。
 
 ## 命令
 

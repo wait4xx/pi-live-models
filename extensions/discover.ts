@@ -118,37 +118,49 @@ export function resolveApiKey(providerId: string, entry: Pick<ProviderEntry, "ap
 /** Static per-id metadata: models-store.json cache first, models.json wins. */
 export function collectStaticById(providerId: string): Record<string, Record<string, unknown>> {
 	const byId: Record<string, Record<string, unknown>> = {};
+	const modelsJson = readJsonSafe(modelsJsonPath());
+	const staticProvider = (modelsJson?.providers as Record<string, Record<string, unknown>> | undefined)?.[providerId];
+	// Provider-level api/compat from models.json apply to BOTH static sources
+	// (store snapshots and models.json models) — same per-key merge semantics
+	// pi's own composer uses for base models. Model-level values always win.
+	const hoist = (m: Record<string, unknown>): Record<string, unknown> => hoistProviderFields(m, staticProvider);
 	const store = readJsonSafe(modelsStorePath());
 	const storeModels = (store?.[providerId] as { models?: unknown[] } | undefined)?.models;
 	for (const m of Array.isArray(storeModels) ? storeModels : []) {
 		if (m && typeof m === "object" && typeof (m as { id?: unknown }).id === "string") {
-			byId[(m as { id: string }).id] = m as Record<string, unknown>;
+			byId[(m as { id: string }).id] = hoist(m as Record<string, unknown>);
 		}
 	}
-	const modelsJson = readJsonSafe(modelsJsonPath());
-	const staticProvider = (modelsJson?.providers as Record<string, Record<string, unknown>> | undefined)?.[providerId];
 	const jsonModels = (staticProvider as { models?: unknown[] } | undefined)?.models;
 	for (const m of Array.isArray(jsonModels) ? jsonModels : []) {
 		if (m && typeof m === "object" && typeof (m as { id?: unknown }).id === "string") {
-			// Hoist models.json provider-level `api`/`compat` into the static entry
-			// (model-level values win). pi's own composer merges provider compat
-			// only into static models — extension-rebuilt live models would
-			// otherwise silently lose both fields.
-			byId[(m as { id: string }).id] = hoistProviderFields(m as Record<string, unknown>, staticProvider);
+			byId[(m as { id: string }).id] = hoist(m as Record<string, unknown>);
 		}
 	}
 	return byId;
 }
 
-/** Merge provider-level `api`/`compat` into a static models.json model entry; model-level values win. Exported for tests. */
+/**
+ * Merge provider-level `api`/`compat` into a static model entry; model-level
+ * values win. `compat` merges per key with one level of nesting for pi's
+ * special routing/template keys — mirroring pi's own `mergeCompat`. Exported
+ * for tests.
+ */
 export function hoistProviderFields(model: Record<string, unknown>, provider: Record<string, unknown> | undefined): Record<string, unknown> {
 	if (!provider) return model;
 	const hoisted: Record<string, unknown> = { ...model };
 	if (hoisted.api === undefined && typeof provider.api === "string") hoisted.api = provider.api;
 	if (isPlainObject(provider.compat)) {
-		hoisted.compat = isPlainObject(hoisted.compat)
-			? { ...provider.compat, ...hoisted.compat }
-			: { ...provider.compat };
+		const modelCompat = isPlainObject(hoisted.compat) ? hoisted.compat : {};
+		const merged: Record<string, unknown> = { ...provider.compat, ...modelCompat };
+		for (const key of ["openRouterRouting", "vercelGatewayRouting", "chatTemplateKwargs", "chatTemplateArgs"]) {
+			const pv = provider.compat[key];
+			const mv = modelCompat[key];
+			// Deep-merge only when both sides are plain objects; otherwise the
+			// shallow spread already applies per-key override (model value wins).
+			if (isPlainObject(pv) && isPlainObject(mv)) merged[key] = { ...pv, ...mv };
+		}
+		hoisted.compat = merged;
 	}
 	return hoisted;
 }

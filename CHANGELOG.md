@@ -13,11 +13,10 @@ Field passthrough: stop losing `models.json` config on live-discovered models.
 
 ### Added
 
-- `authHeader` provider-entry field (boolean, default `false`): send the key as a bare `Authorization` header value instead of `Bearer <key>`.
+- `authHeader` provider-entry field (boolean, default `false`): force an `Authorization: Bearer <key>` header on every chat request (pi's `authHeader` — useful when auth would otherwise not send one, e.g. custom-header gateways).
 - `thinkingLevelMap` / `samplingParams` in `defaults` and per-id `overrides`.
 - `providerRegistrationConfig(entry)` exported from `config.ts` — the pure field-forwarding contract behind registration, unit-tested.
 
-## [0.3.3] - 2026-08-30
 ## [0.3.3] - 2026-08-30
 
 Bootstrap UX: stop re-typing what `models.json` already knows.

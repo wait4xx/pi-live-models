@@ -69,7 +69,7 @@ export interface ProviderEntry {
 	modelsUrl?: string;
 	api?: string;
 	apiKey?: string;
-	/** Send the key as a bare `Authorization` header value instead of `Bearer <key>`. Default false (pi's default). */
+	/** Force an `Authorization: Bearer <key>` header on every chat request (pi's `authHeader`). Default false (pi's default). */
 	authHeader?: boolean;
 	headers?: Record<string, string>;
 	/** Fetch timeout for discovery requests, ms. Default 10000. */

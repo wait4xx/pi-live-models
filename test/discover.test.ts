@@ -251,3 +251,16 @@ test("hoistProviderFields merges provider-level api/compat into static models, m
 	hoistProviderFields(original, provider);
 	assert.deepEqual(original, { id: "m" });
 });
+
+test("hoistProviderFields deep-merges pi's special compat keys, one level", () => {
+	const provider = { compat: { openRouterRouting: { provider: {order: ["A"]} }, chatTemplateKwargs: { top_p: 0.9 } } };
+	const model = { compat: { openRouterRouting: { provider: {order: ["B"], allow_fallbacks: false} } } };
+	const hoisted = hoistProviderFields(model, provider);
+	assert.deepEqual(hoisted.compat, {
+		openRouterRouting: { provider: { order: ["B"], allow_fallbacks: false } },
+		chatTemplateKwargs: { top_p: 0.9 },
+	});
+	// non-object values on either side keep per-key override semantics
+	const hoisted2 = hoistProviderFields({ compat: { chatTemplateKwargs: "flat" } }, provider);
+	assert.deepEqual(hoisted2.compat, { openRouterRouting: { provider: { order: ["A"] } }, chatTemplateKwargs: "flat" });
+});

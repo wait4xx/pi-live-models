@@ -109,7 +109,7 @@ File: `~/.pi/agent/live-models.json` (respects `$PI_CODING_AGENT_DIR`). Validati
 | `api` | — | `openai-completions` / `openai-responses` / `anthropic-messages`. Can be omitted when overriding a built-in provider (the definition is inherited). Also forwarded to pi's provider registration. |
 | `name` | — | Display name. |
 | `apiKey` | — | Credential for the discovery request **and the chat provider registration**: `"$ENV"`, `"${ENV}"`, `"!shell command"`, or literal. See [Auth chain](#auth-chain-discovery-request). |
-| `authHeader` | — | `true` sends the key as a bare `Authorization` header value instead of `Bearer <key>` (pi's `authHeader`). Default `false`. |
+| `authHeader` | — | `true` forces an `Authorization: Bearer <key>` header on every chat request (pi's `authHeader` — for gateways where the normal auth flow would not send one). Default `false`. |
 | `headers` | — | Extra request headers, applied to both the discovery request and pi's provider registration. |
 | `timeoutMs` | — | Discovery fetch timeout, default `10000`. |
 | `refreshIntervalMs` | — | Throttle real fetches to at most one per interval. `0` (default) = fetch on every `/model` open. |
@@ -230,6 +230,11 @@ Live discovery **replaces** the model list pi composed from `models.json`, so th
 - `samplingParams` — previously dropped.
 
 The provider registration now also forwards entry `apiKey` / `headers` / `authHeader` to pi (same values the discovery request uses), instead of only `baseUrl`/`api`/`name`.
+
+Two semantic notes:
+
+- **Auth spec resolution differs by path**: chat requests resolve the forwarded spec with pi's native resolver (embedded `$VAR` interpolation, `$$`/`$!` escapes supported); the discovery request uses the extension's simpler whole-string forms (`"$ENV"`, `"${ENV}"`, `"!command"`, literal). Prefer whole-string specs in the entry.
+- **You cannot delete an inherited field with a top-level `null`** (the ladder treats `null` as "unset"). To make a single thinking level unavailable, set that level's key to `null` *inside* `thinkingLevelMap` — that is its documented meaning in pi.
 
 ## Commands
 
