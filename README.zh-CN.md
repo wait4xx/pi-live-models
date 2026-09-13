@@ -32,6 +32,7 @@
 - 🔑 **凭据复用**——刷新复用你已有的密钥：`/login` 存储凭据 → 条目 `apiKey`（`$ENV` / `${ENV}` / `!命令` / 明文）→ `models.json` → `<PROVIDER>_API_KEY` 环境变量，四级链式解析。密钥永不落日志、永不落缓存。
 - 🪜 **元数据合并阶梯**——`defaults` < 静态定义（`models.json` + `models-store.json`，按 id 匹配）< 端点提示（`context_length`、`max_completion_tokens`、OpenRouter `top_provider.*` 与 `pricing.*` 价格）< **公共目录**（LiteLLM 社区数据，仅精确匹配）< `overrides[id]`。新模型也有合理兜底值而非空白元数据。`mergeStatic: "union"` 还能把网关列表里缺失的静态模型补注册进来。
 - 🌐 **公共元数据目录**——中转站常常乱报元数据（所有模型都盖一个 `context_length: 128000`）。双社区目录（LiteLLM + Models.dev）交叉校验网关：精确同名匹配纠正 `contextWindow`/`maxTokens`，离谱的 live 值被合理性窗口拦截，可疑模式（与目录相差 ≥4×、多模型同一占位值）主动告警并给出 `/live-models-fix` 现成命令。缓存支撑、后台刷新、一个字段即可按 provider 关闭。
+- 🧪 **行为探测**——没有任何目录记录网关“实际执行”哪些 effort 值、`thinking: disabled` 是真关还是被吞、effort 到底改不改变行为。`/live-models-probe <provider> <model>` 按档位（`off`、`minimal`…`max`）各发一条微型差分请求，把每个响应归约为 `{状态, 思考量, token 数}`，据此推导建议的 `thinkingLevelMap`（Anthropic 协议网关附带 `compat.forceAdaptiveThinking`）；`--apply` 直接写入 `overrides`。
 - 🛡️ **永不清空目录**——过滤后 0 模型即报错，pi 保留上一份列表；网络故障回落磁盘缓存（按**当前**规则完整重建），网关挂掉重启也不会空白 `/model`。
 - 📦 零运行时依赖 · TypeScript · 单元测试 · Windows + Ubuntu 双平台 CI。
 
@@ -230,6 +231,7 @@ provider 注册现在还会把条目的 `apiKey` / `headers` / `authHeader` 转�
 | `/live-models-catalog` | 查看公共目录状态：双源条目数与拉取时间、合并数、仲裁统计、缓存路径。 |
 | `/live-models-catalog-refresh` | 强制阻塞式重拉公共元数据目录。 |
 | `/live-models-fix <provider> <model> ctx=<n> [max=<n>]` | 把元数据修正写进 `live-models.json` 的 `overrides`（原子写入，保留文件其余部分），然后 `/live-models-reload` 生效。写入前校验合理性窗口与该 provider 的已知模型 id。 |
+| `/live-models-probe <provider> <model> [--apply]` | 实测网关真实执行行为：按 provider 的聊天 API（`anthropic-messages`、`openai-responses`、`openai-completions`）逐思考档位（`off`、`minimal`…`max`）各发一条微型请求；`off` 探针连发两次，两次都干净才认定可关（中继关思考行为会抖动）。接受的档位映射为自身，被拒的置 `null`；`disabled`/`none` 探针返回 200 但仍带思考则判 `off: null`（关不掉）；各档输出几乎一致时会提示"可能接受但忽略 effort"。`--apply` 把建议的 `thinkingLevelMap`/`compat`/`reasoning` 写入 `overrides`（随后 `/live-models-reload` 生效）。 |
 
 ## 离线缓存与故障行为
 

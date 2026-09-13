@@ -33,11 +33,16 @@
  *   /live-models-catalog-refresh  force a catalog refetch
  *   /live-models-fix <id> <model> ctx=<n> [max=<n>]
  *                            write a metadata correction into overrides
+ *   /live-models-probe <id> <model> [--apply]
+ *                            differential thinking-effort probes against the
+ *                            live endpoint -> suggested thinkingLevelMap/compat
+ *                            (writes overrides with --apply)
  */
 import fs from "node:fs";
 import {
 	applyFixToRawConfig,
 	applyInitToRawConfig,
+	applyProbeToRawConfig,
 	cachePath,
 	catalogPath,
 	computeInitPlan,
@@ -67,7 +72,17 @@ import {
 	type CatalogData,
 	type CatalogManager,
 } from "./catalog.ts";
-import { buildCatalog, buildModelsUrl, collectStaticById, resolveApiKey, type ModelDef, type RefreshContext } from "./discover.ts";
+import { buildCatalog, buildModelsUrl, collectStaticById, envKeyVarName, resolveApiKey, type ModelDef, type RefreshContext } from "./discover.ts";
+import {
+	buildProbeBody,
+	chatEndpointUrl,
+	interpretProbes,
+	planProbeShots,
+	reduceResponse,
+	PROBE_APIS,
+	type ProbeApi,
+	type ProbeOutcome,
+} from "./probe.ts";
 
 /** Structural subset of pi's ExtensionAPI used by this extension. */
 interface ExtensionAPI {
@@ -142,6 +157,12 @@ function writeCache(cache: CacheFile): void {
 function signalWithTimeout(timeoutMs: number, signal?: AbortSignal): AbortSignal {
 	const timeout = AbortSignal.timeout(timeoutMs);
 	return signal ? AbortSignal.any([timeout, signal]) : timeout;
+}
+
+/** Collapse whitespace and cap length for one-line evidence snippets. */
+function truncate(text: string, max: number): string {
+	const flat = text.replace(/\s+/g, " ").trim();
+	return flat.length <= max ? flat : `${flat.slice(0, max)}…`;
 }
 
 function modelsUrlOf(entry: ProviderEntry): string {
@@ -649,6 +670,185 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 			if (patch.contextWindow !== undefined) parts.push(`contextWindow=${patch.contextWindow}`);
 			if (patch.maxTokens !== undefined) parts.push(`maxTokens=${patch.maxTokens}`);
 			ctx.ui.notify(`${LOG} wrote ${providerId}.overrides.${modelId} (${parts.join(", ")})\nRun /live-models-reload to apply.`);
+		},
+	});
+
+	/** Resolve the API for probing: entry.api first, then the same-id models.json provider. */
+	const resolveProbeApi = (providerId: string, entry: ProviderEntry): string | undefined => {
+		if (entry.api) return entry.api;
+		try {
+			const raw: unknown = JSON.parse(fs.readFileSync(modelsJsonPath(), "utf8"));
+			const providers = (raw as { providers?: Record<string, { api?: unknown }> }).providers;
+			const candidate = providers?.[providerId]?.api;
+			return typeof candidate === "string" ? candidate : undefined;
+		} catch {
+			return undefined;
+		}
+	};
+
+	pi.registerCommand("live-models-probe", {
+		description: "Probe thinking-effort behavior of one model; --apply writes the suggested overrides: /live-models-probe <provider> <model> [--apply]",
+		handler: async (args, ctx) => {
+			const tokens = args.trim().split(/\s+/).filter(Boolean);
+			const apply = tokens.includes("--apply");
+			const [providerId, modelId] = tokens.filter((t) => !t.startsWith("--"));
+			if (!providerId || !modelId) {
+				ctx.ui.notify(`Usage: /live-models-probe <provider> <model> [--apply]\nExample: /live-models-probe GLM glm-5.3 --apply\nConfigured: ${[...state.runtimes.keys()].join(", ") || "(none)"}`);
+				return;
+			}
+			const rt = state.runtimes.get(providerId);
+			if (!rt) {
+				ctx.ui.notify(`${LOG} provider "${providerId}" is not configured.\nConfigured: ${[...state.runtimes.keys()].join(", ") || "(none)"}`);
+				return;
+			}
+			// Known-model check (same evidence base as /live-models-fix: last
+			// live list ∪ persisted cache; trust the user when nothing was
+			// discovered yet).
+			const known = new Set((rt.lastModels ?? []).map((m) => m.id));
+			for (const item of state.cache.providers[providerId]?.raw ?? []) {
+				const id = item && typeof item === "object" ? (item as { id?: unknown }).id : undefined;
+				if (typeof id === "string") known.add(id);
+			}
+			if (known.size > 0 && !known.has(modelId)) {
+				ctx.ui.notify(`${LOG} model "${modelId}" is not in ${providerId}'s list — run /live-models-test ${providerId} to see the ids.`);
+				return;
+			}
+			const api = resolveProbeApi(providerId, rt.entry);
+			if (!api || !(PROBE_APIS as readonly string[]).includes(api)) {
+				ctx.ui.notify(`${LOG} cannot probe ${providerId}: api is ${api ? `"${api}" (unsupported)` : "not set"}.\nProbe supports: ${PROBE_APIS.join(", ")}. Set api on the live-models entry or the models.json provider.`);
+				return;
+			}
+			const probeApi = api as ProbeApi;
+			const key = resolveApiKey(providerId, rt.entry);
+			if (!key) {
+				ctx.ui.notify(`${LOG} no credential resolved for ${providerId} (entry apiKey / models.json apiKey / ${envKeyVarName(providerId)} env) — cannot probe.`);
+				return;
+			}
+			const url = chatEndpointUrl(rt.entry.baseUrl, probeApi);
+			const shots = planProbeShots(probeApi);
+			ctx.ui.notify(`${LOG} probing ${providerId}/${modelId} via ${probeApi} — ${shots.length} tiny requests to ${url}${apply ? " (--apply)" : ""} ...`);
+			const headers: Record<string, string> = { ...(rt.entry.headers ?? {}), "content-type": "application/json" };
+			if (probeApi === "anthropic-messages") {
+				headers["x-api-key"] = key;
+				headers["anthropic-version"] = "2023-06-01";
+			if (rt.entry.authHeader) headers.Authorization = `Bearer ${key}`;
+		} else {
+			headers.Authorization = `Bearer ${key}`;
+		}
+			const timeoutMs = Math.max(rt.entry.timeoutMs ?? DEFAULT_TIMEOUT_MS, 30_000);
+			const outcomes: ProbeOutcome[] = [];
+			for (const shot of shots) {
+				// `confirm` shots run twice ("off" + "off·2") — disabling behavior
+				// is known to flip-flop on some relays, so only a clean pair counts.
+				const reps = shot.confirm ? 2 : 1;
+				for (let rep = 1; rep <= reps; rep++) {
+					const outcome: ProbeOutcome = { label: reps > 1 && rep > 1 ? `${shot.label}·${rep}` : shot.label, ok: false, status: null, hasThinking: false, thinkingChars: 0, outputTokens: null, error: undefined };
+					try {
+						const response = await fetch(url, {
+							method: "POST",
+							headers,
+							body: JSON.stringify(buildProbeBody(probeApi, modelId, shot)),
+							signal: signalWithTimeout(timeoutMs),
+						});
+						outcome.status = response.status;
+						if (!response.ok) {
+							const text = await response.text().catch(() => "");
+							outcome.error = truncate(text || `HTTP ${response.status}`, 140);
+							outcomes.push(outcome);
+							continue;
+						}
+						const parsed: unknown = await response.json().catch(() => undefined);
+						if (parsed === undefined) {
+							outcome.error = "200 but body is not JSON";
+							outcomes.push(outcome);
+							continue;
+						}
+						outcome.ok = true;
+						const signal = reduceResponse(probeApi, parsed);
+						outcome.hasThinking = signal.hasThinking;
+						outcome.thinkingChars = signal.thinkingChars;
+						outcome.outputTokens = signal.outputTokens;
+					} catch (err) {
+						outcome.error = truncate(err instanceof Error ? err.message : String(err), 140);
+					}
+					outcomes.push(outcome);
+				}
+			}
+			const suggestion = interpretProbes(probeApi, outcomes);
+			const evidence = outcomes.map((o) => {
+				const mark = o.ok ? "ok  " : "FAIL";
+				const bits: string[] = [`HTTP ${o.status ?? "-"}`];
+				if (o.ok) {
+					bits.push(o.hasThinking ? `thinking≈${o.thinkingChars}` : "thinking=none");
+					if (o.outputTokens !== null) bits.push(`out=${o.outputTokens} tok`);
+				} else if (o.error) {
+					bits.push(o.error);
+				}
+				return `  ${mark}  ${o.label.padEnd(7)} ${bits.join("  ")}`;
+			});
+			if (!suggestion) {
+				ctx.ui.notify([`${LOG} probe: no usable signal — every request failed. Evidence:`, ...evidence].join("\n"));
+				return;
+			}
+			const patch: { thinkingLevelMap?: Record<string, string | null>; compat?: Record<string, unknown>; reasoning?: boolean } = {};
+			if (suggestion.thinkingLevelMap !== undefined) patch.thinkingLevelMap = suggestion.thinkingLevelMap;
+			if (suggestion.compat !== undefined) patch.compat = suggestion.compat;
+			if (suggestion.reasoning !== undefined) patch.reasoning = suggestion.reasoning;
+			if (!apply) {
+				ctx.ui.notify(
+					[
+						`${LOG} probe of ${providerId}/${modelId}:`,
+						...evidence,
+						"",
+						...suggestion.notes.map((n) => `  · ${n}`),
+						"",
+						...(suggestion.thinkingLevelMap !== undefined
+							? ["suggested overrides entry:", ...JSON.stringify(patch, null, 2).split("\n").map((l) => `  ${l}`), "", `Review, then run: /live-models-probe ${providerId} ${modelId} --apply`]
+							: ["Nothing to write (no usable thinkingLevelMap)."]),
+					].join("\n"),
+				);
+				return;
+			}
+			if (suggestion.thinkingLevelMap === undefined) {
+				ctx.ui.notify([`${LOG} probe of ${providerId}/${modelId}:`, ...evidence, "", ...suggestion.notes.map((n) => `  · ${n}`), "", "Nothing to write (no usable thinkingLevelMap)."].join("\n"));
+				return;
+			}
+			let raw: unknown;
+			try {
+				raw = JSON.parse(fs.readFileSync(configPath(), "utf8"));
+			} catch (err) {
+				ctx.ui.notify(`${LOG} cannot read ${configPath()}: ${err instanceof Error ? err.message : err}`);
+				return;
+			}
+			const result = applyProbeToRawConfig(raw, providerId, modelId, patch);
+			if (!result.ok) {
+				ctx.ui.notify(`${LOG} ${result.error}`);
+				return;
+			}
+			try {
+				const tmp = `${configPath()}.tmp`;
+				fs.writeFileSync(tmp, JSON.stringify(raw, null, 2), "utf8");
+				fs.renameSync(tmp, configPath());
+			} catch (err) {
+				try {
+					fs.rmSync(`${configPath()}.tmp`, { force: true });
+				} catch {
+					/* best effort */
+				}
+				ctx.ui.notify(`${LOG} failed to write ${configPath()}: ${err instanceof Error ? err.message : err}`);
+				return;
+			}
+			ctx.ui.notify(
+					[
+						`${LOG} probe of ${providerId}/${modelId}:`,
+						...evidence,
+						"",
+						...suggestion.notes.map((n) => `  · ${n}`),
+						"",
+						`wrote ${providerId}.overrides.${modelId} (${result.fields.join(", ")})`,
+						"Run /live-models-reload to apply.",
+					].join("\n"),
+			);
 		},
 	});
 }

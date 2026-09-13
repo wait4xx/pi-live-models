@@ -510,11 +510,64 @@ export function applyFixToRawConfig(
 	return { ok: true };
 }
 
+/** Patch produced by /live-models-probe — see extensions/probe.ts. */
+export interface ProbePatch {
+	/** Complete 7-level pi thinking map (replaces any existing one). */
+	thinkingLevelMap?: Record<string, string | null>;
+	/** Model-level compat keys — merged onto any existing override compat. */
+	compat?: Record<string, unknown>;
+	/** Only ever true: an observed reasoning model. Never writes false. */
+	reasoning?: boolean;
+}
+
+/**
+ * Apply a probe patch to the RAW config object (as JSON.parse'd from
+ * live-models.json), preserving every other field and the original key
+ * order. thinkingLevelMap replaces wholesale (the suggestion is complete);
+ * compat merges per key (suggested keys win); reasoning is set only when
+ * the patch says true. Mutates `raw` in place; the caller persists it.
+ * Never throws.
+ */
+export function applyProbeToRawConfig(
+	raw: unknown,
+	providerId: string,
+	modelId: string,
+	patch: ProbePatch,
+): { ok: boolean; error?: string; fields: string[] } {
+	if (!isPlainObject(raw)) return { ok: false, error: "config root is not an object", fields: [] };
+	if (RESERVED_IDS.has(providerId) || RESERVED_IDS.has(modelId)) {
+		return { ok: false, error: `"${RESERVED_IDS.has(providerId) ? providerId : modelId}" is not a valid id`, fields: [] };
+	}
+	const providers = raw.providers;
+	if (!isPlainObject(providers) || !isPlainObject(providers[providerId])) {
+		return { ok: false, error: `provider "${providerId}" not found in config`, fields: [] };
+	}
+	const entry = providers[providerId] as Record<string, unknown>;
+	if (!isPlainObject(entry.overrides)) entry.overrides = {};
+	const overrides = entry.overrides as Record<string, unknown>;
+	if (!isPlainObject(overrides[modelId])) overrides[modelId] = {};
+	const model = overrides[modelId] as Record<string, unknown>;
+	const fields: string[] = [];
+	if (patch.thinkingLevelMap !== undefined) {
+		model.thinkingLevelMap = patch.thinkingLevelMap;
+		fields.push("thinkingLevelMap");
+	}
+	if (patch.compat !== undefined) {
+		const existing = isPlainObject(model.compat) ? (model.compat as Record<string, unknown>) : {};
+		model.compat = { ...existing, ...patch.compat };
+		fields.push("compat");
+	}
+	if (patch.reasoning === true) {
+		model.reasoning = true;
+		fields.push("reasoning");
+	}
+	return { ok: true, fields };
+}
+
 export interface InitStub {
 	id: string;
 	baseUrl: string;
 }
-
 export interface InitPlan {
 	/** Provider ids absent from live-models.json that init would add, with their models.json baseUrl. */
 	toAdd: InitStub[];

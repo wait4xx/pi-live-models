@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+Behavior probing: measure what the gateway actually executes.
+
+### Added
+
+- **`/live-models-probe <provider> <model> [--apply]`** — differential thinking-effort probes against the live endpoint. No public catalog records which effort values a gateway accepts, whether `thinking: disabled` is honored or silently swallowed (observed in the wild: the same relay honored it for one model and swallowed it for another — and on a later day swallowed it for both), or whether accepted values change behavior. The command sends one tiny request per level (`off`, `minimal`…`max`) through the provider's own chat API (`anthropic-messages`, `openai-responses`, `openai-completions`; api resolved from the entry or the same-id `models.json` provider); the `off` probe is sent twice and only a clean pair counts, because disabling behavior is known to flip-flop. Each response is reduced to `{status, thinking, tokens}` and interpreted into:
+  - accepted levels map to themselves, rejected levels to `null` (pi hides/clamps them);
+  - `off` honored → `"off"`/`"none"`; swallowed (200 but thinking present) or rejected → `null` — the level is never faked;
+  - Anthropic-protocol gateways with any adaptive success → `compat.forceAdaptiveThinking: true` (without it pi never sends effort strings on `anthropic-messages`);
+  - `reasoning: true` when thinking was observed; near-identical output across accepted levels is flagged as "accepts but ignores".
+  
+  Dry-run by default (evidence table + suggested `overrides` entry); `--apply` writes `thinkingLevelMap` (wholesale), `compat` (merged per key), and `reasoning` (never `false`) into `overrides` in `live-models.json` via the same atomic preserve-write as `/live-models-fix`. Credentials reuse the discovery ladder; probes respect `entry.headers`/`authHeader`; model ids are validated against the last live list ∪ persisted cache.
+
 ## [0.3.4] - 2026-09-09
 
 Field passthrough: stop losing `models.json` config on live-discovered models.
