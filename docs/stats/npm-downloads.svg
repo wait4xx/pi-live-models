@@ -12,10 +12,10 @@
 <line x1="70.0" y1="483" x2="70.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="72.0" y="509" text-anchor="start" font-size="15" fill="#57606a">2026-08-28</text>
 <line x1="245.0" y1="483" x2="245.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="245.0" y="509" text-anchor="middle" font-size="15" fill="#57606a">2026-08-31</text>
 <line x1="420.0" y1="483" x2="420.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="420.0" y="509" text-anchor="middle" font-size="15" fill="#57606a">2026-09-04</text>
-<line x1="595.0" y1="483" x2="595.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="595.0" y="509" text-anchor="middle" font-size="15" fill="#57606a">2026-09-07</text>
-<line x1="770.0" y1="483" x2="770.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="768.0" y="509" text-anchor="end" font-size="15" fill="#57606a">2026-09-11</text>
+<line x1="595.0" y1="483" x2="595.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="595.0" y="509" text-anchor="middle" font-size="15" fill="#57606a">2026-09-08</text>
+<line x1="770.0" y1="483" x2="770.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="768.0" y="509" text-anchor="end" font-size="15" fill="#57606a">2026-09-12</text>
 <rect x="70" y="60" width="700" height="423" fill="none" stroke="#8b98a5" stroke-width="2" rx="3"/>
-<path d="M 70.0 481.4 Q 120.0 58.6 145.0 198.9 Q 170.0 339.2 195.0 399.8 Q 220.0 460.3 245.0 465.2 Q 270.0 470.1 295.0 473.2 Q 320.0 476.3 345.0 479.0 Q 370.0 481.7 395.0 476.5 Q 420.0 471.3 445.0 475.7 Q 470.0 480.1 495.0 474.5 Q 520.0 468.9 545.0 476.0 Q 570.0 483.1 595.0 483.3 Q 620.0 483.4 645.0 482.2 Q 670.0 480.9 695.0 480.6 Q 720.0 480.2 745.0 479.7 L 770.0 479.2" fill="none" stroke="#42bb88" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M 70.0 481.4 Q 116.7 58.6 140.0 198.9 Q 163.3 339.2 186.7 399.8 Q 210.0 460.3 233.3 465.2 Q 256.7 470.1 280.0 473.2 Q 303.3 476.3 326.7 479.0 Q 350.0 481.7 373.3 476.5 Q 396.7 471.3 420.0 475.7 Q 443.3 480.1 466.7 474.5 Q 490.0 468.9 513.3 476.0 Q 536.7 483.1 560.0 483.3 Q 583.3 483.4 606.7 482.2 Q 630.0 480.9 653.3 480.6 Q 676.7 480.2 700.0 479.7 Q 723.3 479.2 746.7 480.9 L 770.0 482.7" fill="none" stroke="#42bb88" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
 <rect x="84" y="72" width="280" height="54" fill="#ffffff" stroke="#8b98a5" stroke-width="1.5" rx="6"/>
 <line x1="96" y1="89" x2="120" y2="89" stroke="#42bb88" stroke-width="3" stroke-linecap="round"/>
 <text x="128" y="94" font-size="15" fill="#1f2328">pi-live-models</text>
