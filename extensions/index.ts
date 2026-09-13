@@ -79,6 +79,7 @@ import {
 	interpretProbes,
 	planProbeShots,
 	reduceResponse,
+	sniffedThinkingFormat,
 	PROBE_APIS,
 	type ProbeApi,
 	type ProbeOutcome,
@@ -726,15 +727,16 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 			}
 			const url = chatEndpointUrl(rt.entry.baseUrl, probeApi);
 			const shots = planProbeShots(probeApi);
-			ctx.ui.notify(`${LOG} probing ${providerId}/${modelId} via ${probeApi} — ${shots.length} tiny requests to ${url}${apply ? " (--apply)" : ""} ...`);
+			const requestCount = shots.reduce((n, s) => n + (s.confirm ? 2 : 1), 0);
+			ctx.ui.notify(`${LOG} probing ${providerId}/${modelId} via ${probeApi} — ${requestCount} tiny requests to ${url}${apply ? " (--apply)" : ""} ...`);
 			const headers: Record<string, string> = { ...(rt.entry.headers ?? {}), "content-type": "application/json" };
 			if (probeApi === "anthropic-messages") {
 				headers["x-api-key"] = key;
 				headers["anthropic-version"] = "2023-06-01";
-			if (rt.entry.authHeader) headers.Authorization = `Bearer ${key}`;
-		} else {
-			headers.Authorization = `Bearer ${key}`;
-		}
+				if (rt.entry.authHeader) headers.Authorization = `Bearer ${key}`;
+			} else {
+				headers.Authorization = `Bearer ${key}`;
+			}
 			const timeoutMs = Math.max(rt.entry.timeoutMs ?? DEFAULT_TIMEOUT_MS, 30_000);
 			const outcomes: ProbeOutcome[] = [];
 			for (const shot of shots) {
@@ -775,6 +777,22 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 				}
 			}
 			const suggestion = interpretProbes(probeApi, outcomes);
+			// openai-completions: pi auto-detects a different thinking wire format
+			// for known gateway hosts (deepseek/zai/together/ant-ling/openrouter)
+			// and an explicit compat.thinkingFormat overrides everything. The
+			// probe measures bare reasoning_effort, so on such gateways its
+			// verdicts describe requests pi does not make — show the evidence but
+			// never write the map.
+			if (probeApi === "openai-completions" && suggestion?.thinkingLevelMap !== undefined) {
+				const configured = typeof rt.entry.compat?.thinkingFormat === "string" ? (rt.entry.compat.thinkingFormat as string) : undefined;
+				const format = configured ?? sniffedThinkingFormat(rt.entry.baseUrl);
+				if (format !== "openai") {
+					suggestion.thinkingLevelMap = undefined;
+					suggestion.compat = undefined;
+					suggestion.reasoning = undefined;
+					suggestion.notes.unshift(`pi sends this gateway a "${format}" thinking wire format (${configured ? "compat.thinkingFormat" : "baseUrl-sniffed"}), not the bare reasoning_effort the probe measures — evidence shown for reference only, nothing written; configure thinkingLevelMap manually`);
+				}
+			}
 			const evidence = outcomes.map((o) => {
 				const mark = o.ok ? "ok  " : "FAIL";
 				const bits: string[] = [`HTTP ${o.status ?? "-"}`];

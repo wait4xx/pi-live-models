@@ -173,9 +173,11 @@ export function reduceResponse(api: ProbeApi, parsed: unknown): ProbeSignal {
 	if (api === "anthropic-messages") {
 		if (Array.isArray(parsed.content)) {
 			for (const block of parsed.content) {
-				if (isPlainObject(block) && block.type === "thinking") {
+				// redacted_thinking carries no plaintext but is thinking all the
+				// same — a level whose only thinking is redacted must still count.
+				if (isPlainObject(block) && (block.type === "thinking" || block.type === "redacted_thinking")) {
 					signal.hasThinking = true;
-					signal.thinkingChars += typeof block.thinking === "string" ? block.thinking.length : 0;
+				signal.thinkingChars += typeof block.thinking === "string" ? block.thinking.length : 0;
 				}
 			}
 		}
@@ -203,6 +205,22 @@ export function reduceResponse(api: ProbeApi, parsed: unknown): ProbeSignal {
 	return signal;
 }
 
+/**
+ * Sniff pi's auto-detected thinking wire format for an openai-completions
+ * gateway from its baseUrl (mirrors pi's detectCompat host list). Gateways
+ * that match none of these use the plain `reasoning_effort` shape the probe
+ * sends; a configured compat.thinkingFormat overrides this sniff.
+ */
+export function sniffedThinkingFormat(baseUrl: string): "deepseek" | "zai" | "together" | "ant-ling" | "openrouter" | "openai" {
+	const url = baseUrl.toLowerCase();
+	if (url.includes("deepseek.com")) return "deepseek";
+	if (url.includes("api.z.ai") || url.includes("open.bigmodel.cn")) return "zai";
+	if (url.includes("api.together.ai") || url.includes("api.together.xyz")) return "together";
+	if (url.includes("api.ant-ling.com")) return "ant-ling";
+	if (url.includes("openrouter.ai")) return "openrouter";
+	return "openai";
+}
+
 function summarizeFailures(outcomes: ProbeOutcome[]): string {
 	const counts = new Map<string, number>();
 	for (const o of outcomes) {
@@ -225,14 +243,16 @@ function summarizeFailures(outcomes: ProbeOutcome[]): string {
  */
 export function interpretProbes(api: ProbeApi, outcomes: ProbeOutcome[]): ProbeSuggestion | null {
 	const byLabel = new Map(outcomes.map((o) => [o.label, o]));
-	const off = byLabel.get("off");
 	// The `off` shot runs twice (label "off" + "off·2") — relays are known to
 	// honor disabling on one request and swallow it on the next. Only a clean
-	// pair counts as disableable; any thinking (or failure) in either flips
+	// pair counts as disableable; a swallowed or failed confirmation flips
 	// the verdict to "cannot disable" with a dedicated note.
+	const off = byLabel.get("off");
 	const off2 = byLabel.get("off\u00b72");
-	const offCleanPair = off && off.ok && !off.hasThinking && (!off2 || (off2.ok && !off2.hasThinking));
-	const offFlipFlopped = offCleanPair === false && off2 !== undefined && off !== undefined && off.ok && !off.hasThinking;
+	const offHonoredFirst = off !== undefined && off.ok && !off.hasThinking;
+	const offCleanPair = offHonoredFirst && (off2 === undefined || (off2.ok && !off2.hasThinking));
+	const offConfirmFailed = offHonoredFirst && off2 !== undefined && !off2.ok;
+	const offFlipFlopped = offHonoredFirst && off2 !== undefined && off2.ok && off2.hasThinking;
 	const efforts = EFFORT_LEVELS.map((level) => byLabel.get(level)).filter((o): o is ProbeOutcome => o !== undefined);
 
 	if (!outcomes.some((o) => o.ok)) return null;
@@ -258,11 +278,10 @@ export function interpretProbes(api: ProbeApi, outcomes: ProbeOutcome[]): ProbeS
 	}
 
 	const map: Record<string, string | null> = { off: null };
-	if (api === "anthropic-messages") {
-		map.off = offCleanPair ? "off" : null;
-	} else {
-		map.off = off && off.ok && (!off2 || off2.ok) ? "none" : null;
-	}
+	// Both APIs require the clean pair: a 200-with-thinking off probe must
+	// never produce a writable off level (pi would send the disable request
+	// and the gateway would still reason).
+	map.off = offCleanPair ? (api === "anthropic-messages" ? "off" : "none") : null;
 	for (const level of EFFORT_LEVELS) {
 		const o = byLabel.get(level);
 		map[level] = o && o.ok ? level : null;
@@ -271,16 +290,20 @@ export function interpretProbes(api: ProbeApi, outcomes: ProbeOutcome[]): ProbeS
 	const notes: string[] = [];
 	if (offFlipFlopped) {
 		notes.push("off: disabling looked honored on the first request but the confirmation request still contains thinking — relay behavior flip-flops; off=null (cannot rely on disabling)");
-	} else if (api === "anthropic-messages") {
-		if (off && off.ok && off.hasThinking) {
-			notes.push("off: thinking.type=disabled returned 200 but the response still contains thinking — the gateway swallows it; off=null (cannot disable)");
-		} else if (!off || !off.ok) {
-			notes.push(`off: ${off ? `HTTP ${off.status}` : "probe missing"} — disabling rejected; off=null`);
-		}
-	} else if (off && off.ok && (off.hasThinking || (off2 && off2.ok && off2.hasThinking))) {
-		notes.push("off: effort=none returned 200 but the response still contains reasoning — treated as not disableable; off=null");
+	} else if (offConfirmFailed) {
+		notes.push(`off: confirmation probe failed (HTTP ${off2?.status ?? "network error"}) — disabling unconfirmed; off=null`);
+	} else if (off && off.ok && off.hasThinking) {
+		notes.push(
+			api === "anthropic-messages"
+				? "off: thinking.type=disabled returned 200 but the response still contains thinking — the gateway swallows it; off=null (cannot disable)"
+				: "off: effort=none returned 200 but the response still contains reasoning — treated as not disableable; off=null",
+		);
 	} else if (!off || !off.ok) {
-		notes.push(`off: ${off ? `HTTP ${off.status}` : "probe missing"} — effort=none rejected; off=null (pi omits the reasoning parameter)`);
+		notes.push(
+			api === "anthropic-messages"
+				? `off: ${off ? `HTTP ${off.status}` : "probe missing"} — disabling rejected; off=null`
+				: `off: ${off ? `HTTP ${off.status}` : "probe missing"} — effort=none rejected; off=null (pi omits the reasoning parameter)`,
+		);
 	}
 
 	const anyThinking = outcomes.some((o) => o.hasThinking);

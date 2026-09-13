@@ -10,9 +10,10 @@ Behavior probing: measure what the gateway actually executes.
   - accepted levels map to themselves, rejected levels to `null` (pi hides/clamps them);
   - `off` honored → `"off"`/`"none"`; swallowed (200 but thinking present) or rejected → `null` — the level is never faked;
   - Anthropic-protocol gateways with any adaptive success → `compat.forceAdaptiveThinking: true` (without it pi never sends effort strings on `anthropic-messages`);
-  - `reasoning: true` when thinking was observed; near-identical output across accepted levels is flagged as "accepts but ignores".
+  - `reasoning: true` when thinking was observed; near-identical output across accepted levels is flagged as "accepts but ignores";
+  - openai-completions gateways whose thinking wire format pi would auto-detect as non-OpenAI (deepseek/zai/together/ant-ling/openrouter hosts, or a configured `compat.thinkingFormat`) get an evidence-only report — the probe measures bare `reasoning_effort`, which is not the shape pi sends there, so nothing is written.
   
-  Dry-run by default (evidence table + suggested `overrides` entry); `--apply` writes `thinkingLevelMap` (wholesale), `compat` (merged per key), and `reasoning` (never `false`) into `overrides` in `live-models.json` via the same atomic preserve-write as `/live-models-fix`. Credentials reuse the discovery ladder; probes respect `entry.headers`/`authHeader`; model ids are validated against the last live list ∪ persisted cache.
+  Dry-run by default (evidence table + suggested `overrides` entry); `--apply` writes `thinkingLevelMap` (wholesale), `compat` (merged per key), and `reasoning` (never `false`) into `overrides` in `live-models.json` via the same atomic preserve-write as `/live-models-fix`. Credentials reuse the discovery ladder minus the `/login` context credential (commands do not receive it); probes respect `entry.headers`/`authHeader`; model ids are validated against the last live list ∪ persisted cache.
 
 ## [0.3.4] - 2026-09-09
 

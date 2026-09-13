@@ -231,7 +231,7 @@ provider 注册现在还会把条目的 `apiKey` / `headers` / `authHeader` 转�
 | `/live-models-catalog` | 查看公共目录状态：双源条目数与拉取时间、合并数、仲裁统计、缓存路径。 |
 | `/live-models-catalog-refresh` | 强制阻塞式重拉公共元数据目录。 |
 | `/live-models-fix <provider> <model> ctx=<n> [max=<n>]` | 把元数据修正写进 `live-models.json` 的 `overrides`（原子写入，保留文件其余部分），然后 `/live-models-reload` 生效。写入前校验合理性窗口与该 provider 的已知模型 id。 |
-| `/live-models-probe <provider> <model> [--apply]` | 实测网关真实执行行为：按 provider 的聊天 API（`anthropic-messages`、`openai-responses`、`openai-completions`）逐思考档位（`off`、`minimal`…`max`）各发一条微型请求；`off` 探针连发两次，两次都干净才认定可关（中继关思考行为会抖动）。接受的档位映射为自身，被拒的置 `null`；`disabled`/`none` 探针返回 200 但仍带思考则判 `off: null`（关不掉）；各档输出几乎一致时会提示"可能接受但忽略 effort"。`--apply` 把建议的 `thinkingLevelMap`/`compat`/`reasoning` 写入 `overrides`（随后 `/live-models-reload` 生效）。 |
+| `/live-models-probe <provider> <model> [--apply]` | 实测网关真实执行行为：按 provider 的聊天 API（`anthropic-messages`、`openai-responses`、`openai-completions`）逐思考档位（`off`、`minimal`…`max`）各发一条微型请求；`off` 探针连发两次，两次都干净才认定可关（中继关思考行为会抖动）。接受的档位映射为自身，被拒的置 `null`；`disabled`/`none` 探针返回 200 但仍带思考则判 `off: null`（关不掉）；各档输出几乎一致时会提示"可能接受但忽略 effort"。`--apply` 把建议的 `thinkingLevelMap`/`compat`/`reasoning` 写入 `overrides`（随后 `/live-models-reload` 生效）。openai-completions 网关若会被 pi 按宿主自动识别为非 OpenAI 思考协议（deepseek/zai/together/ant-ling/openrouter 域名，或配置了 `compat.thinkingFormat`），探针只出证据报告、不写入——探针测的是裸 `reasoning_effort`，与 pi 在这类网关上发送的参数形状不同。 |
 
 ## 离线缓存与故障行为
 

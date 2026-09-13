@@ -7,6 +7,7 @@ import {
 	chatEndpointUrl,
 	interpretProbes,
 	planProbeShots,
+	sniffedThinkingFormat,
 	reduceResponse,
 	type ProbeOutcome,
 } from "../extensions/probe.ts";
@@ -107,7 +108,9 @@ function outcome(label: string, over: Partial<ProbeOutcome> = {}): ProbeOutcome 
 
 function fullSet(over: Record<string, Partial<ProbeOutcome>>): ProbeOutcome[] {
 	const labels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-	return labels.map((label) => outcome(label, over[label] ?? {}));
+	const base = labels.map((label) => outcome(label, over[label] ?? {}));
+	// Production always sends the confirmation shot — mirror that by default.
+	return [...base, outcome(`off${"·"}2`, over[`off${"·"}2`] ?? {})];
 }
 
 test("interpretProbes: null when every probe failed", () => {
@@ -139,11 +142,28 @@ test("interpretProbes: anthropic — off rejected (400)", () => {
 });
 
 test("interpretProbes: anthropic — off flip-flopped across confirmation pair => null with dedicated note", () => {
-	const base = fullSet({ low: { hasThinking: true, outputTokens: 8 }, high: { hasThinking: true, outputTokens: 40 } });
-	const outcomes = [...base, { label: "off·2", ok: true, status: 200, hasThinking: true, thinkingChars: 9, outputTokens: 20, error: undefined } as ProbeOutcome];
-	const suggestion = interpretProbes("anthropic-messages", outcomes);
+	const suggestion = interpretProbes("anthropic-messages", fullSet({ "off·2": { hasThinking: true, thinkingChars: 9 }, low: { hasThinking: true, outputTokens: 8 } }));
 	assert.equal(suggestion?.thinkingLevelMap?.off, null);
 	assert.ok(suggestion?.notes.some((n) => n.includes("flip-flops")));
+});
+
+test("interpretProbes: openai — off 200-with-thinking => null, never \"none\"", () => {
+	const suggestion = interpretProbes("openai-responses", fullSet({ off: { hasThinking: true, thinkingChars: 5 }, low: { hasThinking: true, outputTokens: 6 }, max: { hasThinking: true, outputTokens: 40 } }));
+	assert.equal(suggestion?.thinkingLevelMap?.off, null);
+	assert.ok(suggestion?.notes.some((n) => n.includes("not disableable")));
+});
+
+test("interpretProbes: openai — off flip-flop => null with flip note", () => {
+	const suggestion = interpretProbes("openai-responses", fullSet({ "off·2": { hasThinking: true, thinkingChars: 4 }, low: { hasThinking: true, outputTokens: 6 }, max: { hasThinking: true, outputTokens: 40 } }));
+	assert.equal(suggestion?.thinkingLevelMap?.off, null);
+	assert.ok(suggestion?.notes.some((n) => n.includes("flip-flops")));
+});
+
+test("interpretProbes: confirmation failure is reported as unconfirmed, not flip-flop", () => {
+	const suggestion = interpretProbes("anthropic-messages", fullSet({ "off·2": { ok: false, status: 500, error: "boom" }, low: { hasThinking: true, outputTokens: 6 } }));
+	assert.equal(suggestion?.thinkingLevelMap?.off, null);
+	assert.ok(suggestion?.notes.some((n) => n.includes("unconfirmed")));
+	assert.ok(!suggestion?.notes.some((n) => n.includes("flip-flops")));
 });
 
 test("interpretProbes: anthropic — clean off pair keeps off available", () => {
@@ -189,6 +209,22 @@ test("interpretProbes: flat accepted efforts are flagged as possibly ignored", (
 	assert.ok(suggestion?.notes.some((n) => n.includes("may accept but ignore effort values")));
 	assert.equal(suggestion?.reasoning, undefined); // no thinking observed -> not forced
 	assert.ok(suggestion?.notes.some((n) => n.includes("reasoning:true manually")));
+});
+
+test("reduceResponse: anthropic redacted_thinking counts as thinking", () => {
+	const signal = reduceResponse("anthropic-messages", { content: [{ type: "redacted_thinking", data: "xx" }, { type: "text", text: "143" }], usage: { output_tokens: 4 } });
+	assert.equal(signal.hasThinking, true);
+	assert.equal(signal.thinkingChars, 0);
+});
+
+test("sniffedThinkingFormat mirrors pi's detectCompat host list", () => {
+	assert.equal(sniffedThinkingFormat("https://api.deepseek.com/v1"), "deepseek");
+	assert.equal(sniffedThinkingFormat("https://open.bigmodel.cn/paas/v4"), "zai");
+	assert.equal(sniffedThinkingFormat("https://api.z.ai/api/coding/paas/v4"), "zai");
+	assert.equal(sniffedThinkingFormat("https://api.together.xyz/v1"), "together");
+	assert.equal(sniffedThinkingFormat("https://api.ant-ling.com/v1"), "ant-ling");
+	assert.equal(sniffedThinkingFormat("https://openrouter.ai/api/v1"), "openrouter");
+	assert.equal(sniffedThinkingFormat("https://gw.example.com/v1"), "openai");
 });
 
 // ---------------------------------------------------------------------------
