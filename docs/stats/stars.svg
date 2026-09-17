@@ -6,11 +6,16 @@
 <line x1="70" y1="165.8" x2="770" y2="165.8" stroke="#d0d7de" stroke-width="1.5" stroke-dasharray="2 7"/>
 <text x="60" y="488.0" text-anchor="end" font-size="15" fill="#57606a">0</text>
 <text x="60" y="276.5" text-anchor="end" font-size="15" fill="#57606a">1</text>
+<line x1="70.0" y1="483" x2="70.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="72.0" y="509" text-anchor="start" font-size="15" fill="#57606a">2026-09-17</text>
+<line x1="245.0" y1="483" x2="245.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="245.0" y="509" text-anchor="middle" font-size="15" fill="#57606a">2026-09-17</text>
+<line x1="420.0" y1="483" x2="420.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="420.0" y="509" text-anchor="middle" font-size="15" fill="#57606a">2026-09-17</text>
+<line x1="595.0" y1="483" x2="595.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="595.0" y="509" text-anchor="middle" font-size="15" fill="#57606a">2026-09-17</text>
+<line x1="770.0" y1="483" x2="770.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="768.0" y="509" text-anchor="end" font-size="15" fill="#57606a">2026-09-18</text>
 <rect x="70" y="60" width="700" height="423" fill="none" stroke="#8b98a5" stroke-width="2" rx="3"/>
-<text x="420" y="271.5" text-anchor="middle" font-size="18" fill="#57606a">no data yet</text>
+<circle cx="420.0" cy="60.0" r="4" fill="#3297d4"/>
 <rect x="84" y="72" width="243" height="54" fill="#ffffff" stroke="#8b98a5" stroke-width="1.5" rx="6"/>
 <line x1="96" y1="89" x2="120" y2="89" stroke="#3297d4" stroke-width="3" stroke-linecap="round"/>
 <text x="128" y="94" font-size="15" fill="#1f2328">wait4xx/pi-live-models</text>
-<text x="96" y="114" font-size="13" fill="#57606a">0 stars</text>
+<text x="96" y="114" font-size="13" fill="#57606a">1 stars</text>
 
 </svg>
