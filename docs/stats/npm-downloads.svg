@@ -10,15 +10,15 @@
 <text x="60" y="170.8" text-anchor="end" font-size="15" fill="#57606a">448</text>
 <text x="60" y="65.0" text-anchor="end" font-size="15" fill="#57606a">597</text>
 <line x1="70.0" y1="483" x2="70.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="72.0" y="509" text-anchor="start" font-size="15" fill="#57606a">2026-08-28</text>
-<line x1="245.0" y1="483" x2="245.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="245.0" y="509" text-anchor="middle" font-size="15" fill="#57606a">2026-09-03</text>
-<line x1="420.0" y1="483" x2="420.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="420.0" y="509" text-anchor="middle" font-size="15" fill="#57606a">2026-09-10</text>
-<line x1="595.0" y1="483" x2="595.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="595.0" y="509" text-anchor="middle" font-size="15" fill="#57606a">2026-09-17</text>
-<line x1="770.0" y1="483" x2="770.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="768.0" y="509" text-anchor="end" font-size="15" fill="#57606a">2026-09-24</text>
+<line x1="245.0" y1="483" x2="245.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="245.0" y="509" text-anchor="middle" font-size="15" fill="#57606a">2026-09-04</text>
+<line x1="420.0" y1="483" x2="420.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="420.0" y="509" text-anchor="middle" font-size="15" fill="#57606a">2026-09-11</text>
+<line x1="595.0" y1="483" x2="595.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="595.0" y="509" text-anchor="middle" font-size="15" fill="#57606a">2026-09-18</text>
+<line x1="770.0" y1="483" x2="770.0" y2="490" stroke="#8b98a5" stroke-width="1.5"/><text x="768.0" y="509" text-anchor="end" font-size="15" fill="#57606a">2026-09-25</text>
 <rect x="70" y="60" width="700" height="423" fill="none" stroke="#8b98a5" stroke-width="2" rx="3"/>
-<path d="M 70.0 481.4 Q 95.9 58.6 108.9 198.9 Q 121.9 339.2 134.8 399.8 Q 147.8 460.3 160.7 465.2 Q 173.7 470.1 186.7 473.2 Q 199.6 476.3 212.6 479.0 Q 225.6 481.7 238.5 476.5 Q 251.5 471.3 264.4 475.7 Q 277.4 480.1 290.4 474.5 Q 303.3 468.9 316.3 476.0 Q 329.3 483.1 342.2 483.3 Q 355.2 483.4 368.1 482.2 Q 381.1 480.9 394.1 480.6 Q 407.0 480.2 420.0 479.7 Q 433.0 479.2 445.9 480.6 Q 458.9 481.9 471.9 425.1 Q 484.8 368.2 497.8 420.1 Q 510.7 472.0 523.7 478.1 Q 536.7 484.1 549.6 477.4 Q 562.6 470.7 575.6 476.2 Q 588.5 481.7 601.5 478.9 Q 614.4 476.1 627.4 474.8 Q 640.4 473.4 653.3 473.5 Q 666.3 473.6 679.3 474.5 Q 692.2 475.3 705.2 478.6 Q 718.1 482.0 731.1 479.3 Q 744.1 476.5 757.0 479.6 L 770.0 482.7" fill="none" stroke="#42bb88" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M 70.0 481.4 Q 95.0 58.6 107.5 198.9 Q 120.0 339.2 132.5 399.8 Q 145.0 460.3 157.5 465.2 Q 170.0 470.1 182.5 473.2 Q 195.0 476.3 207.5 479.0 Q 220.0 481.7 232.5 476.5 Q 245.0 471.3 257.5 475.7 Q 270.0 480.1 282.5 474.5 Q 295.0 468.9 307.5 476.0 Q 320.0 483.1 332.5 483.3 Q 345.0 483.4 357.5 482.2 Q 370.0 480.9 382.5 480.6 Q 395.0 480.2 407.5 479.7 Q 420.0 479.2 432.5 480.6 Q 445.0 481.9 457.5 425.1 Q 470.0 368.2 482.5 420.1 Q 495.0 472.0 507.5 478.1 Q 520.0 484.1 532.5 477.4 Q 545.0 470.7 557.5 476.2 Q 570.0 481.7 582.5 478.9 Q 595.0 476.1 607.5 474.8 Q 620.0 473.4 632.5 473.5 Q 645.0 473.6 657.5 474.5 Q 670.0 475.3 682.5 470.5 Q 695.0 465.7 707.5 471.1 Q 720.0 476.5 732.5 476.8 Q 745.0 477.0 757.5 477.4 L 770.0 477.7" fill="none" stroke="#42bb88" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
 <rect x="84" y="72" width="286" height="54" fill="#ffffff" stroke="#8b98a5" stroke-width="1.5" rx="6"/>
 <line x1="96" y1="89" x2="120" y2="89" stroke="#42bb88" stroke-width="3" stroke-linecap="round"/>
 <text x="128" y="94" font-size="15" fill="#1f2328">pi-live-models</text>
-<text x="96" y="114" font-size="13" fill="#57606a">npm downloads/day · since 2026-08-28: 1169</text>
+<text x="96" y="114" font-size="13" fill="#57606a">npm downloads/day · since 2026-08-28: 1206</text>
 
 </svg>
