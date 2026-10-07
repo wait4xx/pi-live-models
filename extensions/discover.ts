@@ -5,9 +5,8 @@
  * Pure functions are exported for unit tests; the fs-backed lookups read
  * `models.json` / `models-store.json` from the pi agent directory.
  */
-import { execSync } from "node:child_process";
 import fs from "node:fs";
-import { modelsJsonPath, modelsStorePath, type ModelDefaults, type ModelOverride, type ProviderEntry } from "./config.ts";
+import { modelsJsonPath, modelsStorePath, resolveConfigValue, type ModelDefaults, type ModelOverride, type ProviderEntry } from "./config.ts";
 import { applyFilters, walkPath, type CompiledFilters, type FilterOutcome } from "./filters.ts";
 import {
 	CONTEXT_WINDOW_MAX,
@@ -62,22 +61,16 @@ export function buildModelsUrl(baseUrl: string): string {
 }
 
 /**
- * Resolve an apiKey spec: `$ENV` | `${ENV}` | `!shell command` | literal.
- * Returns undefined when the spec is absent, the env var is unset, or the
- * command fails (never throws).
+ * Resolve an apiKey spec with pi's own config-value semantics: inline
+ * `$VAR`/`${VAR}` interpolation, `$$`/`$!` literal escapes, a leading `!`
+ * shell command, or a literal string. Returns undefined when the spec is
+ * absent, a referenced env var is unset, or the command fails (never
+ * throws) — so discovery authenticates with exactly the key the chat
+ * path would send.
  */
 export function resolveKeySpec(spec: unknown): string | undefined {
 	if (typeof spec !== "string" || !spec) return undefined;
-	const envMatch = spec.match(/^\$\{(\w+)\}$/) ?? spec.match(/^\$(\w+)$/);
-	if (envMatch) return process.env[envMatch[1]];
-	if (spec.startsWith("!")) {
-		try {
-			return execSync(spec.slice(1), { encoding: "utf8", timeout: 10_000 }).trim();
-		} catch {
-			return undefined;
-		}
-	}
-	return spec;
+	return resolveConfigValue(spec);
 }
 
 /** `<PROVIDER_ID>` upper-cased, non-alnum -> `_`, suffixed `_API_KEY`. */
@@ -113,6 +106,74 @@ export function resolveApiKey(providerId: string, entry: Pick<ProviderEntry, "ap
 	const fromModelsJson = resolveKeySpec(providers?.[providerId]?.apiKey);
 	if (fromModelsJson) return fromModelsJson;
 	return envKeyFor(providerId);
+}
+
+export interface FetchHeadersResult {
+	/** Resolved header set (entry specs resolved, auth header synthesized). */
+	headers: Record<string, string>;
+	/** Human-readable notes for entry headers that could not be resolved. */
+	dropped: string[];
+}
+
+/**
+ * Build the header set for this extension's OWN fetches (model discovery,
+ * probe): resolve entry header specs with pi's config-value semantics (an
+ * unset env var drops that header, never an empty value), then mirror the
+ * auth header pi's chat path would send for the provider's api family:
+ *
+ * - `anthropic-messages` → `x-api-key` + `anthropic-version` (pi's native
+ *   anthropic auth); `Authorization: Bearer` only when `authHeader` is set
+ * - everything else → `Authorization: Bearer <key>`, suppressed when the
+ *   entry explicitly sets `authHeader: false` (escape hatch for gateways
+ *   that authenticate via a custom header and reject a stray `Authorization`)
+ *
+ * An `Authorization` (or `x-api-key`) header already present in
+ * `entry.headers` always wins over the synthesized one.
+ */
+export function buildFetchHeaders(
+	entry: Pick<ProviderEntry, "headers" | "authHeader">,
+	key: string | undefined,
+	api: string | undefined,
+): FetchHeadersResult {
+	const headers: Record<string, string> = {};
+	const dropped: string[] = [];
+	const hasHeader = (name: string): boolean => Object.keys(headers).some((k) => k.toLowerCase() === name);
+	for (const [name, value] of Object.entries(entry.headers ?? {})) {
+		const resolved = resolveConfigValue(value);
+		if (!resolved) dropped.push(`header "${name}" skipped (unresolved env/command spec)`); // pi drops falsy header values too
+		else headers[name] = resolved;
+	}
+	if (api === "anthropic-messages") {
+		if (key && !hasHeader("x-api-key")) headers["x-api-key"] = key;
+		if (!hasHeader("anthropic-version")) headers["anthropic-version"] = "2023-06-01";
+		if (entry.authHeader === true && key) headers.Authorization = `Bearer ${key}`; // pi's forced header overwrites (withConfiguredAuth)
+	} else if (entry.authHeader === true && key) {
+		headers.Authorization = `Bearer ${key}`; // forced, overwrites — mirrors pi's chat path
+	} else if (key && entry.authHeader !== false && !hasHeader("authorization")) {
+		headers.Authorization = `Bearer ${key}`;
+	}
+	return { headers, dropped };
+}
+
+/**
+ * Mask a URL for display, error messages, and the on-disk cache: resolved
+ * baseUrl/modelsUrl values may embed credentials as query parameters
+ * (`?key=...`), userinfo, or fragments. Every query value is masked — this
+ * is a display string only, never used for requests.
+ */
+export function redactUrl(url: string): string {
+	try {
+		const parsed = new URL(url);
+		if (parsed.username || parsed.password) {
+			parsed.username = "...";
+			parsed.password = "";
+		}
+		for (const name of [...parsed.searchParams.keys()]) parsed.searchParams.set(name, "...");
+		if (parsed.hash) parsed.hash = "...";
+		return parsed.toString();
+	} catch {
+		return url;
+	}
 }
 
 /** Static per-id metadata: models-store.json cache first, models.json wins. */

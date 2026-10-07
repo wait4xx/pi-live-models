@@ -10,6 +10,7 @@
  * are skipped entirely. The extension must never crash pi startup
  * because of a config typo.
  */
+import { execSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -65,12 +66,15 @@ export type MergeStatic = "live" | "union";
 
 export interface ProviderEntry {
 	name?: string;
+	/** http(s) API root. Inline `$VAR`/`${VAR}` references and a leading `!command` resolve once at config load; the resolved URL is registered with pi and fetched by discovery. Inherited models.json baseUrls resolve the same way. */
 	baseUrl: string;
+	/** Explicit models-endpoint override. Same env/command resolution as {@link ProviderEntry.baseUrl}, at config load; an unresolvable spec is ignored with a warning (discovery then derives the endpoint from baseUrl). */
 	modelsUrl?: string;
 	api?: string;
 	apiKey?: string;
-	/** Force an `Authorization: Bearer <key>` header on every chat request (pi's `authHeader`). Default false (pi's default). */
+	/** Force an `Authorization: Bearer <key>` header on every chat request (pi's `authHeader`). Default false (pi's default). Discovery/probe fetches mirror chat auth per api family (anthropic → `x-api-key`); an explicit `false` additionally suppresses the synthesized `Authorization` there — escape hatch for custom-header auth (e.g. `x-goog-api-key`). */
 	authHeader?: boolean;
+	/** Extra headers for this extension's own fetches and pi's chat registration (specs passed through raw; pi resolves them per chat request). Values may use `$VAR`/`${VAR}`/`!command`; a value whose env var is unset is skipped with a warning, never sent as an empty string. */
 	headers?: Record<string, string>;
 	/** Fetch timeout for discovery requests, ms. Default 10000. */
 	timeoutMs?: number;
@@ -292,6 +296,120 @@ function isHttpUrl(value: string): boolean {
 	}
 }
 
+/** One piece of a parsed config-value template: literal text or an env reference. */
+type TemplatePart = { type: "literal"; value: string } | { type: "env"; name: string };
+
+const ENV_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const ENV_VAR_NAME_PREFIX_RE = /^[A-Za-z_][A-Za-z0-9_]*/;
+
+/** A config-value spec parsed into either a shell command or template parts. */
+type ParsedConfigValue = { kind: "command"; command: string } | { kind: "template"; parts: TemplatePart[] };
+
+/**
+ * Parse a config-value spec with pi's own resolution rules (pi core
+ * resolve-config-value): a leading `!` marks the whole value as a shell
+ * command; otherwise inline `$VAR` and `${VAR}` interpolate, `$$`/`$!`
+ * escape a literal `$`/`!`, and `${not-a-name}`/stray `$` stay literal.
+ */
+function parseConfigValueTemplate(spec: string): ParsedConfigValue {
+	if (spec.startsWith("!")) return { kind: "command", command: spec.slice(1) };
+	const parts: TemplatePart[] = [];
+	const appendLiteral = (value: string): void => {
+		if (!value) return;
+		const previous = parts[parts.length - 1];
+		if (previous?.type === "literal") previous.value += value;
+		else parts.push({ type: "literal", value });
+	};
+	let index = 0;
+	while (index < spec.length) {
+		const dollarIndex = spec.indexOf("$", index);
+		if (dollarIndex < 0) {
+			appendLiteral(spec.slice(index));
+			break;
+		}
+		appendLiteral(spec.slice(index, dollarIndex));
+		const next = spec[dollarIndex + 1];
+		if (next === "$" || next === "!") {
+			appendLiteral(next);
+			index = dollarIndex + 2;
+			continue;
+		}
+		if (next === "{") {
+			const endIndex = spec.indexOf("}", dollarIndex + 2);
+			if (endIndex < 0) {
+				appendLiteral("$");
+				index = dollarIndex + 1;
+				continue;
+			}
+			const name = spec.slice(dollarIndex + 2, endIndex);
+			if (ENV_VAR_NAME_RE.test(name)) parts.push({ type: "env", name });
+			else appendLiteral(spec.slice(dollarIndex, endIndex + 1));
+			index = endIndex + 1;
+			continue;
+		}
+		const match = spec.slice(dollarIndex + 1).match(ENV_VAR_NAME_PREFIX_RE);
+		if (match) {
+			parts.push({ type: "env", name: match[0] });
+			index = dollarIndex + 1 + match[0].length;
+			continue;
+		}
+		appendLiteral("$");
+		index = dollarIndex + 1;
+	}
+	return { kind: "template", parts };
+}
+
+/**
+ * Resolve a config-value spec the way pi resolves its own: a leading `!`
+ * runs a shell command and uses its trimmed stdout; otherwise interpolate
+ * inline `$VAR`/`${VAR}` (`$$`/`$!` escape literals). An env var that is
+ * unset (or set to an empty string, pi's convention) or a failing/empty
+ * command makes the whole value undefined — never an empty interpolation.
+ *
+ * @param spec raw config string
+ * @returns the resolved value, or undefined when a reference cannot be
+ *          resolved (unset env var, failed or empty command)
+ */
+export function resolveConfigValue(spec: string): string | undefined {
+	const parsed = parseConfigValueTemplate(spec);
+	if (parsed.kind === "command") {
+		try {
+			// stdin ignored like pi's executeCommand — a spec that reads stdin
+		// fails fast instead of hanging until the timeout.
+			return execSync(parsed.command, { encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "ignore"] }).trim() || undefined;
+		} catch {
+			return undefined;
+		}
+	}
+	let resolved = "";
+	for (const part of parsed.parts) {
+		if (part.type === "literal") {
+			resolved += part.value;
+			continue;
+		}
+		// pi treats empty-string env vars as unset (env[name] || undefined).
+		const value = process.env[part.name] || undefined;
+		if (value === undefined) return undefined;
+		resolved += value;
+	}
+	return resolved;
+}
+
+/**
+ * Env var names a spec references that are currently unset (empty-string
+ * values count as unset, matching {@link resolveConfigValue}). Command
+ * specs reference nothing.
+ */
+export function missingEnvNames(spec: string): string[] {
+	const parsed = parseConfigValueTemplate(spec);
+	if (parsed.kind !== "template") return [];
+	const names = new Set<string>();
+	for (const part of parsed.parts) {
+		if (part.type === "env" && !(process.env[part.name] || undefined)) names.add(part.name);
+	}
+	return [...names];
+}
+
 /**
  * Parse + validate a raw config object.
  *
@@ -362,35 +480,66 @@ export function parseConfig(
 
 		// baseUrl: explicit value wins; an omitted baseUrl is inherited from
 		// the same-id models.json provider (when a staticProviders map was
-		// given); no usable source -> skip the entry entirely.
-		if (entryRaw.baseUrl !== undefined) {
-			const baseUrl = optionalString(entryRaw.baseUrl);
-			if (!baseUrl || !isHttpUrl(baseUrl)) {
-				issues.push({ provider: id, field: "baseUrl", message: `providers.${id}.baseUrl must be an http(s) URL — entry skipped` });
-				skipped.push(id);
-				continue;
-			}
+		// given); no usable source -> skip the entry entirely. Env/command
+		// specs resolve BEFORE the http(s) check so an unset variable is
+		// reported by name instead of as an invalid URL.
+		const inheritedSpec = entryRaw.baseUrl === undefined && opts?.staticProviders
+			? optionalString(opts.staticProviders[id]?.baseUrl)
+			: undefined;
+		const baseUrlSpec = entryRaw.baseUrl !== undefined ? optionalString(entryRaw.baseUrl) : inheritedSpec;
+		const baseUrl = baseUrlSpec !== undefined ? resolveConfigValue(baseUrlSpec) : undefined;
+		if (baseUrl !== undefined && isHttpUrl(baseUrl)) {
 			entry.baseUrl = baseUrl;
+		} else if (baseUrlSpec !== undefined && baseUrl === undefined) {
+			const names = missingEnvNames(baseUrlSpec);
+			const reason = names.length ? `references undefined environment variable(s) ${names.join(", ")}` : "could not be resolved from its env/command spec";
+			const origin = entryRaw.baseUrl === undefined ? " (inherited from models.json)" : "";
+			issues.push({ provider: id, field: "baseUrl", message: `providers.${id}.baseUrl${origin} ${reason} — entry skipped` });
+			skipped.push(id);
+			continue;
+		} else if (entryRaw.baseUrl === undefined && inheritedSpec === undefined) {
+			const hint = opts?.staticProviders
+				? ` — entry skipped (no usable "${id}" provider in models.json to inherit from)`
+				: " — entry skipped";
+			issues.push({ provider: id, field: "baseUrl", message: `providers.${id}.baseUrl is required${hint}` });
+			skipped.push(id);
+			continue;
 		} else {
-			const inherited = opts?.staticProviders ? optionalString(opts.staticProviders[id]?.baseUrl) : undefined;
-			if (inherited !== undefined && isHttpUrl(inherited)) {
-				entry.baseUrl = inherited;
-			} else {
-				const hint = opts?.staticProviders
-					? ` — entry skipped (no usable "${id}" provider in models.json to inherit from)`
-					: " — entry skipped";
-				issues.push({ provider: id, field: "baseUrl", message: `providers.${id}.baseUrl is required${hint}` });
-				skipped.push(id);
-				continue;
-			}
+			const hint = entryRaw.baseUrl === undefined
+				? ` — entry skipped (no usable "${id}" provider in models.json to inherit from)`
+				: " — entry skipped";
+			issues.push({ provider: id, field: "baseUrl", message: `providers.${id}.baseUrl must be an http(s) URL${hint}` });
+			skipped.push(id);
+			continue;
 		}
 
-		// optional plain strings
-		for (const field of ["name", "modelsUrl", "api", "apiKey"] as const) {
+		// optional plain strings (modelsUrl is handled below: env resolution)
+		for (const field of ["name", "api", "apiKey"] as const) {
 			const value = optionalString(entryRaw[field]);
 			if (value !== undefined) entry[field] = value;
 			else if (entryRaw[field] !== undefined) {
 				issues.push({ provider: id, field, message: `providers.${id}.${field} must be a string — ignored` });
+			}
+		}
+
+		// modelsUrl: env/command specs resolve at load; an unresolvable,
+		// empty, or non-http(s) spec degrades to the baseUrl-derived
+		// derivation, never to a broken fetch URL.
+		if (entryRaw.modelsUrl !== undefined) {
+			const spec = optionalString(entryRaw.modelsUrl);
+			if (spec === undefined) {
+				issues.push({ provider: id, field: "modelsUrl", message: `providers.${id}.modelsUrl must be a string — ignored` });
+			} else {
+				const resolved = resolveConfigValue(spec);
+				if (!resolved) {
+					const names = missingEnvNames(spec);
+					const reason = names.length ? `references undefined environment variable(s) ${names.join(", ")}` : "could not be resolved from its env/command spec";
+					issues.push({ provider: id, field: "modelsUrl", message: `providers.${id}.modelsUrl ${reason} — field ignored, discovery falls back to the baseUrl-derived URL` });
+				} else if (!isHttpUrl(resolved)) {
+					issues.push({ provider: id, field: "modelsUrl", message: `providers.${id}.modelsUrl must resolve to an http(s) URL — field ignored, discovery falls back to the baseUrl-derived URL` });
+				} else {
+					entry.modelsUrl = resolved;
+				}
 			}
 		}
 

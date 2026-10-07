@@ -29,7 +29,7 @@
 
 - 🚫 **默认零过滤**——扩展对"哪些模型好"没有任何预设观点，规则全部来自你的配置：通配符（`*audio*`）、正则（`^glm-4\.`）、**字段级规则**（`includeBy`/`excludeBy`，按点路径匹配 live item 任意字段，如 `owned_by`、`architecture.input_modalities`）、可复用**预设**（`presets`）。exclude 永远优先；include 非空即白名单。
 - 🔍 **过滤可观测**——`/live-models` 显示 `raw -> kept` 统计；`/live-models-test <provider>` 干跑并**逐模型**标注保留/丢弃原因；`/live-models-refresh [ids...]` 绕过节流强制立即刷新。
-- 🔑 **凭据复用**——刷新复用你已有的密钥：`/login` 存储凭据 → 条目 `apiKey`（`$ENV` / `${ENV}` / `!命令` / 明文）→ `models.json` → `<PROVIDER>_API_KEY` 环境变量，四级链式解析。密钥永不落日志、永不落缓存。
+- 🔑 **凭据复用**——刷新复用你已有的密钥：`/login` 存储凭据 → 条目 `apiKey`（`$ENV` / `${ENV}` / `!命令` / 明文）→ `models.json` → `<PROVIDER>_API_KEY` 环境变量，四级链式解析。密钥永不落日志、永不落缓存。环境变量/命令规范在 `headers`、`baseUrl`、`modelsUrl` 里同样可用，按 pi 自身的语义解析；嵌入了凭据的 URL 在错误信息、状态输出与缓存里一律打码。
 - 🪜 **元数据合并阶梯**——`defaults` < 静态定义（`models.json` + `models-store.json`，按 id 匹配）< 端点提示（`context_length`、`max_completion_tokens`、OpenRouter `top_provider.*` 与 `pricing.*` 价格）< **公共目录**（LiteLLM 社区数据，仅精确匹配）< `overrides[id]`。新模型也有合理兜底值而非空白元数据。`mergeStatic: "union"` 还能把网关列表里缺失的静态模型补注册进来。
 - 🌐 **公共元数据目录**——中转站常常乱报元数据（所有模型都盖一个 `context_length: 128000`）。双社区目录（LiteLLM + Models.dev）交叉校验网关：精确同名匹配纠正 `contextWindow`/`maxTokens`，离谱的 live 值被合理性窗口拦截，可疑模式（与目录相差 ≥4×、多模型同一占位值）主动告警并给出 `/live-models-fix` 现成命令。缓存支撑、后台刷新、一个字段即可按 provider 关闭。
 - 🧪 **行为探测**——没有任何目录记录网关“实际执行”哪些 effort 值、`thinking: disabled` 是真关还是被吞、effort 到底改不改变行为。`/live-models-probe <provider> <model>` 按档位（`off`、`minimal`…`max`）各发一条微型差分请求，把每个响应归约为 `{状态, 思考量, token 数}`，据此推导建议的 `thinkingLevelMap`（Anthropic 协议网关附带 `compat.forceAdaptiveThinking`）；`--apply` 直接写入 `overrides`。
@@ -86,13 +86,13 @@ pi install git:github.com/wait4xx/pi-live-models
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `baseUrl` | ✅* | API 根地址。模型端点自动推导：以版本段（`/v1`、`/v2`…）结尾 → `{base}/models`，否则 → `{base}/v1/models`。*可省略，从 `models.json` 同名 provider 继承；显式写了但非法的值绝不继承。* |
-| `modelsUrl` | — | 推导规则不适用时，显式指定模型端点。 |
+| `baseUrl` | ✅* | API 根地址。模型端点自动推导：以版本段（`/v1`、`/v2`…）结尾 → `{base}/models`，否则 → `{base}/v1/models`。*可省略，从 `models.json` 同名 provider 继承；显式写了但非法的值绝不继承。* 支持环境变量/命令规范（`$VAR` / `${VAR}` / `!命令`，`$$` 转义字面 `$`），在配置加载时解析一次——解析不出则整条跳过并在警告里点名变量。 |
+| `modelsUrl` | — | 推导规则不适用时，显式指定模型端点。与 `baseUrl` 同套环境变量/命令解析；解析不出则忽略该字段并警告（发现回退到推导端点）。 |
 | `api` | — | `openai-completions` / `openai-responses` / `anthropic-messages`。覆盖内置 provider 时可省略（继承原定义）；同时会转发给 pi 的 provider 注册。 |
 | `name` | — | 显示名。 |
-| `apiKey` | — | 发现请求**与对话 provider 注册**共用的凭据：`"$ENV"`、`"${ENV}"`、`"!shell 命令"` 或明文。见[凭据链](#凭据链发现请求)。 |
-| `authHeader` | — | `true` 时强制在每个对话请求上加 `Authorization: Bearer <key>` 头（对应 pi 的 `authHeader`——用于常规认证流程不会携带该头的网关）。默认 `false`。 |
-| `headers` | — | 附加请求头，发现请求与 pi 的 provider 注册都会带上。 |
+| `apiKey` | — | 发现请求**与对话 provider 注册**共用的凭据：`"$ENV"`、`"${ENV}"`、`"!shell 命令"` 或明文（内联引用与 `$$`/`$!` 转义也可——即 pi 的配置值语法）。见[凭据链](#凭据链发现请求)。 |
+| `authHeader` | — | `true` 时强制在每个对话请求上加 `Authorization: Bearer <key>` 头（对应 pi 的 `authHeader`——用于常规认证流程不会携带该头的网关）。默认 `false`；显式 `false` 同时会抑制发现/探测试请求上合成的 `Authorization`。 |
+| `headers` | — | 附加请求头，发现请求与 pi 的 provider 注册都会带上（规范原样透传——对话时由 pi 解析环境变量/命令）。某值引用的环境变量未设置时，该头会跳过并警告，绝不以空串发送。 |
 | `timeoutMs` | — | 发现请求超时，默认 `10000`。 |
 | `refreshIntervalMs` | — | 限流：真实请求的最小间隔。`0`（默认）= 每次打开 `/model` 都拉取。 |
 | `compat` | — | provider 级 compat 兜底（如 `{"thinkingFormat":"qwen"}`）。 |
@@ -158,6 +158,10 @@ pi install git:github.com/wait4xx/pi-live-models
 3. `~/.pi/agent/models.json` → `providers[id].apiKey`（同一规范语法）
 4. 环境变量 `<PROVIDER_ID>` 大写、非字母数字转 `_`、后缀 `_API_KEY`
 
+**环境变量与命令规范。** `apiKey`、`headers` 的值、`baseUrl`、`modelsUrl` 全部支持 pi 的配置值语法：内联 `$VAR` / `${VAR}` 插值、`$$` → 字面 `$`、`$!` → 字面 `!`、或前导 `!` 执行 shell 命令并取其 stdout（去首尾空白）——与 pi 解析自家配置值的方式完全一致，因此发现请求的认证行为与对话请求对齐。未设置的变量绝不以空串插值：解析不出的 `baseUrl` 整条跳过，解析不出的 `modelsUrl`/请求头跳过该字段/该头，警告均点名变量。`baseUrl`/`modelsUrl` 在配置加载时解析一次（启动 pi 前先设好环境变量，或跑 `/live-models-reload`）；`apiKey` 与 `headers` 每次请求时解析。嵌入凭据的 URL（如 `?key=${SECRET}`）一律打码——错误信息、`/live-models` 状态输出与磁盘缓存里的查询值、userinfo、片段都会被掩蔽。
+
+**发现认证镜像对话。** 发现/探测试请求按 provider 的 api 家族发送与对话路径相同的认证头：`anthropic-messages` 类发 `x-api-key` + `anthropic-version`（仅当 `authHeader: true` 才加 `Authorization: Bearer`）；其余发 `Authorization: Bearer <key>`——但条目显式设了 `authHeader: false` 的除外，这是给用自定义头认证（如 Google 的 `x-goog-api-key`）、会拒绝多余 `Authorization` 的网关留的逃生门。你显式设置的头优先于合成的头——但 `authHeader: true` 除外：强制 `Bearer` 会覆盖它，与 pi 对话路径的行为一致。
+
 ⚠️ `!命令` 形式会执行 shell 命令——请先弄清它跑的是什么。密钥永不落日志与错误信息；缓存文件只存模型元数据，绝不存凭据。
 
 ### 公共元数据目录
@@ -215,7 +219,7 @@ provider 注册现在还会把条目的 `apiKey` / `headers` / `authHeader` 转�
 
 两条语义注记：
 
-- **凭据 spec 的解析路径不同**：对话请求用 pi 原生解析器处理转发的 spec（支持内嵌 `$VAR` 插值、`$$`/`$!` 转义）；发现请求用扩展自己的整串形式（`"$ENV"`、`"${ENV}"`、`"!命令"`、明文）。条目里建议用整串形式。
+- **凭据 spec 两条路径解析方式一致**：对话请求用 pi 原生解析器处理转发的 spec；发现/探测试请求用同一套模板语义（`$VAR`/`${VAR}` 内联插值、`$$`/`$!` 转义、`!命令`）——内联写法在哪里都没问题。
 - **顶层 `null` 不能删除继承到的字段**（阶梯把 `null` 视为未设置）。若只想禁用某个思考档，把 `thinkingLevelMap` 内部对应档位的键设为 `null`——那才是它在 pi 里的文档化含义。
 - **扩展的 `overrides` 是整表替换**：与 pi `models.json` 的 `modelOverrides`（对 `thinkingLevelMap`/`samplingParams` 按键合并）不同，本扩展的 `overrides[id]` 会替换整个对象——要写完整表，而不是只写变更的键。
 

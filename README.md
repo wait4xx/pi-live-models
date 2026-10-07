@@ -48,7 +48,7 @@ One config file, zero code, zero runtime dependencies.
 
 - 🚫 **Zero filtering by default** — the extension has no opinions about which models are "good". Every filter is yours: glob (`*audio*`), regex (`^glm-4\.`), field-level rules (`includeBy`/`excludeBy` on dotted paths into the live item, e.g. `owned_by`, `architecture.input_modalities`), and reusable **presets**. Exclude always wins; a non-empty include set acts as a whitelist.
 - 🔍 **Filter observability** — `/live-models` shows `raw -> kept` statistics; `/live-models-test <provider>` dry-runs discovery and annotates **every** model with its keep/drop reason; `/live-models-refresh [ids...]` forces an immediate refresh bypassing `refreshIntervalMs`.
-- 🔑 **Credential reuse** — discovery reuses the key you already have: `/login` stored credential → entry `apiKey` (`$ENV` / `${ENV}` / `!command` / literal) → `models.json` → `<PROVIDER>_API_KEY` env. Keys never appear in logs or errors.
+- 🔑 **Credential reuse** — discovery reuses the key you already have: `/login` stored credential → entry `apiKey` (`$ENV` / `${ENV}` / `!command` / literal) → `models.json` → `<PROVIDER>_API_KEY` env. Keys never appear in logs or errors. Env/command specs work in `headers`, `baseUrl`, and `modelsUrl` too, resolved with pi's own semantics; URLs that embed credentials are redacted in errors, status output, and the cache.
 - 🪜 **Metadata merge ladder** — `defaults` < static definitions (`models.json` + `models-store.json`, by id) < live endpoint hints (`context_length`, `max_completion_tokens`, OpenRouter `top_provider.*` and `pricing.*` cost) < **public catalog** (LiteLLM data, exact match only) < `overrides[id]`. New models get sane fallbacks instead of blank metadata. `mergeStatic: "union"` can additionally register static-only models the gateway forgot to list.
 - 🌐 **Public metadata catalog** — relays often misreport metadata (`context_length: 128000` stamped on every model). Two community catalogs (LiteLLM + Models.dev) cross-check the gateway: exact-name matches correct `contextWindow`/`maxTokens`, implausible live values are rejected by sanity windows, and suspicious patterns (≥4× divergence from the catalog, uniform placeholder values) are surfaced with a ready-made `/live-models-fix` hint. Cache-backed, background-refreshed, one flag to disable per provider.
 - 🧪 **Behavior probing** — no catalog records which effort values a gateway *actually executes*, whether `thinking: disabled` is honored or silently swallowed, or whether effort changes behavior at all. `/live-models-probe <provider> <model>` sends one tiny differential request per level (`off`, `minimal`…`max`) against the live endpoint, reduces each response to `{status, thinking, tokens}`, and derives a suggested `thinkingLevelMap` (+ `compat.forceAdaptiveThinking` on Anthropic-protocol gateways) from the evidence — `--apply` writes it into `overrides`.
@@ -105,13 +105,13 @@ File: `~/.pi/agent/live-models.json` (respects `$PI_CODING_AGENT_DIR`). Validati
 
 | Field | Required | Description |
 |---|---|---|
-| `baseUrl` | ✅* | API root. Models endpoint is derived: ends with a version segment (`/v1`, `/v2`, …) → `{base}/models`, otherwise → `{base}/v1/models`. *May be omitted to inherit from the same-id `models.json` provider; a value that is present but invalid is never inherited.* |
-| `modelsUrl` | — | Explicit models-endpoint override when the derivation rule does not fit. |
+| `baseUrl` | ✅* | API root. Models endpoint is derived: ends with a version segment (`/v1`, `/v2`, …) → `{base}/models`, otherwise → `{base}/v1/models`. *May be omitted to inherit from the same-id `models.json` provider; a value that is present but invalid is never inherited.* Accepts env/command specs (`$VAR` / `${VAR}` / `!command`, `$$` escapes a literal `$`), resolved once at config load — an unresolvable spec skips the entry with a warning naming the variable. |
+| `modelsUrl` | — | Explicit models-endpoint override when the derivation rule does not fit. Same env/command resolution as `baseUrl`; an unresolvable spec is ignored with a warning (discovery falls back to the derived URL). |
 | `api` | — | `openai-completions` / `openai-responses` / `anthropic-messages`. Can be omitted when overriding a built-in provider (the definition is inherited). Also forwarded to pi's provider registration. |
 | `name` | — | Display name. |
-| `apiKey` | — | Credential for the discovery request **and the chat provider registration**: `"$ENV"`, `"${ENV}"`, `"!shell command"`, or literal. See [Auth chain](#auth-chain-discovery-request). |
-| `authHeader` | — | `true` forces an `Authorization: Bearer <key>` header on every chat request (pi's `authHeader` — for gateways where the normal auth flow would not send one). Default `false`. |
-| `headers` | — | Extra request headers, applied to both the discovery request and pi's provider registration. |
+| `apiKey` | — | Credential for the discovery request **and the chat provider registration**: `"$ENV"`, `"${ENV}"`, `"!shell command"`, or literal (inline references and `$$`/`$!` escapes work too — pi's config-value syntax). See [Auth chain](#auth-chain-discovery-request). |
+| `authHeader` | — | `true` forces an `Authorization: Bearer <key>` header on every chat request (pi's `authHeader` — for gateways where the normal auth flow would not send one). Default `false`; an explicit `false` also suppresses the synthesized `Authorization` on discovery/probe fetches. |
+| `headers` | — | Extra request headers, applied to both the discovery request and pi's provider registration (raw spec passthrough — pi resolves env/command specs for chat). A value whose env var is unset is skipped with a warning, never sent as an empty string. |
 | `timeoutMs` | — | Discovery fetch timeout, default `10000`. |
 | `refreshIntervalMs` | — | Throttle real fetches to at most one per interval. `0` (default) = fetch on every `/model` open. |
 | `compat` | — | Provider-level compat fallback for models without one (e.g. `{"thinkingFormat":"qwen"}`). |
@@ -177,6 +177,10 @@ Presets cannot reference other presets; unknown preset names are warned + ignore
 3. `~/.pi/agent/models.json` → `providers[id].apiKey` (same spec syntax)
 4. env `<PROVIDER_ID>` upper-cased, non-alnum → `_`, suffixed `_API_KEY`
 
+**Env & command specs.** `apiKey`, `headers` values, `baseUrl`, and `modelsUrl` all accept pi's config-value syntax: inline `$VAR` / `${VAR}` interpolation, `$$` → literal `$`, `$!` → literal `!`, or a leading `!` to run a shell command and use its trimmed stdout — resolved exactly the way pi resolves its own config values, so discovery authenticates like chat. Unset variables never interpolate as empty strings: an unresolvable `baseUrl` spec skips the entry and an unresolvable `modelsUrl`/header is dropped, each with a warning naming the variable. `baseUrl`/`modelsUrl` resolve once at config load (set the env before starting pi, or run `/live-models-reload`); `apiKey` and `headers` resolve per request. A URL that ends up embedding a credential (e.g. `?key=${SECRET}`) is redacted — query values, userinfo, and fragments are masked in error messages, `/live-models` status output, and the on-disk cache.
+
+**Discovery auth mirrors chat.** The discovery/probe fetch sends the auth header pi's chat path would send for the provider's api family: `anthropic-messages` providers get `x-api-key` + `anthropic-version` (plus `Authorization: Bearer` only when `authHeader: true`); everything else gets `Authorization: Bearer <key>` — unless the entry sets `authHeader: false`, the escape hatch for gateways that authenticate via a custom header (e.g. Google's `x-goog-api-key`) and reject a stray `Authorization`. A header you set explicitly wins over the synthesized one — except under `authHeader: true`, where the forced `Bearer` overwrites it, exactly like pi's chat path.
+
 ⚠️ The `!command` form executes a shell command — only use it if you understand what it runs. Keys never appear in logs or errors; the cache file stores model metadata only, never credentials.
 
 ### Public metadata catalog
@@ -234,7 +238,7 @@ The provider registration now also forwards entry `apiKey` / `headers` / `authHe
 
 Two semantic notes:
 
-- **Auth spec resolution differs by path**: chat requests resolve the forwarded spec with pi's native resolver (embedded `$VAR` interpolation, `$$`/`$!` escapes supported); the discovery request uses the extension's simpler whole-string forms (`"$ENV"`, `"${ENV}"`, `"!command"`, literal). Prefer whole-string specs in the entry.
+- **Auth specs resolve identically on both paths**: chat requests resolve the forwarded spec with pi's native resolver; the discovery/probe fetches use the same template semantics (`$VAR`/`${VAR}` inline interpolation, `$$`/`$!` escapes, `!command`) — inline specs are fine everywhere.
 - **You cannot delete an inherited field with a top-level `null`** (the ladder treats `null` as "unset"). To make a single thinking level unavailable, set that level's key to `null` *inside* `thinkingLevelMap` — that is its documented meaning in pi.
 - **Extension `overrides` replace the whole table**: unlike pi's `models.json` `modelOverrides` (which merge `thinkingLevelMap`/`samplingParams` key by key), this extension's `overrides[id]` swap the entire object — write the full table, not just the changed keys.
 

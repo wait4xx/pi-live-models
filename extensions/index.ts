@@ -72,7 +72,7 @@ import {
 	type CatalogData,
 	type CatalogManager,
 } from "./catalog.ts";
-import { buildCatalog, buildModelsUrl, collectStaticById, envKeyVarName, resolveApiKey, type ModelDef, type RefreshContext } from "./discover.ts";
+import { buildCatalog, buildFetchHeaders, buildModelsUrl, collectStaticById, envKeyVarName, redactUrl, resolveApiKey, type ModelDef, type RefreshContext } from "./discover.ts";
 import {
 	buildProbeBody,
 	chatEndpointUrl,
@@ -170,6 +170,19 @@ function modelsUrlOf(entry: ProviderEntry): string {
 	return entry.modelsUrl ?? buildModelsUrl(entry.baseUrl);
 }
 
+/** Resolve a provider's chat api family: entry.api first, then the same-id models.json provider. */
+function resolveProviderApi(providerId: string, entry: ProviderEntry): string | undefined {
+	if (entry.api) return entry.api;
+	try {
+		const raw: unknown = JSON.parse(fs.readFileSync(modelsJsonPath(), "utf8"));
+		const providers = (raw as { providers?: Record<string, { api?: unknown }> }).providers;
+		const candidate = providers?.[providerId]?.api;
+		return typeof candidate === "string" ? candidate : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /** One live discovery pass: fetch, filter, merge metadata, union static. Throws on any failure. */
 async function discoverOnce(
 	rt: ProviderRuntime,
@@ -178,8 +191,10 @@ async function discoverOnce(
 ): Promise<{ models: ModelDef[]; outcomes: FilterOutcome[]; url: string; raw: unknown[]; staticCount: number; warnings: string[] }> {
 	const url = modelsUrlOf(rt.entry);
 	const key = context?.credential?.key ?? resolveApiKey(rt.id, rt.entry);
-	const headers: Record<string, string> = { ...(rt.entry.headers ?? {}) };
-	if (key) headers.Authorization = `Bearer ${key}`;
+	// Header specs resolve per request (pi template semantics) and the auth
+	// header mirrors what pi's chat path would send for this api family.
+	const { headers, dropped } = buildFetchHeaders(rt.entry, key, resolveProviderApi(rt.id, rt.entry));
+	for (const note of dropped) console.warn(`${LOG} ${rt.id}: ${note}`);
 
 	let response: Response;
 	try {
@@ -188,20 +203,20 @@ async function discoverOnce(
 			signal: signalWithTimeout(rt.entry.timeoutMs ?? DEFAULT_TIMEOUT_MS, context?.signal),
 		});
 	} catch (err) {
-		throw new Error(`fetch ${url} failed: ${err instanceof Error ? err.message : String(err)}`);
+		throw new Error(`fetch ${redactUrl(url)} failed: ${err instanceof Error ? err.message : String(err)}`);
 	}
 	if (!response.ok) {
 		const hint = response.status === 401 || response.status === 403
 			? " (auth failed — check apiKey / /login credential)"
 			: "";
-		throw new Error(`GET ${url} -> HTTP ${response.status}${hint}`);
+		throw new Error(`GET ${redactUrl(url)} -> HTTP ${response.status}${hint}`);
 	}
 
 	let payload: unknown;
 	try {
 		payload = await response.json();
 	} catch {
-		throw new Error(`GET ${url} -> response body is not valid JSON`);
+		throw new Error(`GET ${redactUrl(url)} -> response body is not valid JSON`);
 	}
 	const envelope = payload as { data?: unknown; models?: unknown };
 	const items: unknown[] = Array.isArray(envelope?.data)
@@ -229,13 +244,13 @@ async function discoverOnce(
 	// from mergeStatic:"union" must never paper over it.
 	if (liveModels.length === 0) {
 		if (outcomes.length === 0) {
-			throw new FilterEmptyError(`0 usable models returned by ${url} — keeping previous catalog`);
+			throw new FilterEmptyError(`0 usable models returned by ${redactUrl(url)} — keeping previous catalog`);
 		}
 		const summary = summarizeDrops(outcomes);
 		const drops = summary.drops.map((d) => `${d.reason} ×${d.count}`).join(", ");
-		throw new FilterEmptyError(`0 models survived filters from ${url} — dropped: ${drops} — keeping previous catalog`);
+		throw new FilterEmptyError(`0 models survived filters from ${redactUrl(url)} — dropped: ${drops} — keeping previous catalog`);
 	}
-	return { models: [...liveModels, ...staticModels], outcomes, url, raw: items, staticCount: staticModels.length, warnings };
+	return { models: [...liveModels, ...staticModels], outcomes, url: redactUrl(url), raw: items, staticCount: staticModels.length, warnings };
 }
 
 function makeRefreshModels(rt: ProviderRuntime, state: ExtensionState): (context: RefreshContext) => Promise<ModelDef[]> {
@@ -352,7 +367,7 @@ function filtersSummaryLine(rt: ProviderRuntime): string {
 }
 
 function statusLine(rt: ProviderRuntime): string {
-	const url = modelsUrlOf(rt.entry);
+	const url = redactUrl(modelsUrlOf(rt.entry));
 	const api = rt.entry.api ? ` (${rt.entry.api})` : "";
 	const modes: string[] = [];
 	if (rt.entry.mergeStatic === "union") modes.push("mergeStatic=union");
@@ -455,7 +470,7 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 				return;
 			}
 			reloadState();
-			const lines = plan.toAdd.map((stub) => `  + ${stub.id}  ${stub.baseUrl}`);
+			const lines = plan.toAdd.map((stub) => `  + ${stub.id}  ${redactUrl(stub.baseUrl)}`);
 			const notes: string[] = [];
 			if (plan.existing.length) notes.push(`  = ${plan.existing.length} already configured (untouched)`);
 			if (plan.unusable.length) notes.push(`  ! not adopted (reserved id or no http(s) baseUrl): ${plan.unusable.join(", ")}`);
@@ -484,7 +499,7 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 				ctx.ui.notify(`${LOG} provider "${id}" is not configured.\nConfigured: ${[...state.runtimes.keys()].join(", ") || "(none)"}`);
 				return;
 			}
-			ctx.ui.notify(`${LOG} testing ${id} — ${modelsUrlOf(rt.entry)} ...`);
+			ctx.ui.notify(`${LOG} testing ${id} — ${redactUrl(modelsUrlOf(rt.entry))} ...`);
 			try {
 				const { models, outcomes, url, staticCount, warnings } = await discoverOnce(rt, state, undefined);
 				const summary = summarizeDrops(outcomes);
@@ -674,19 +689,6 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	/** Resolve the API for probing: entry.api first, then the same-id models.json provider. */
-	const resolveProbeApi = (providerId: string, entry: ProviderEntry): string | undefined => {
-		if (entry.api) return entry.api;
-		try {
-			const raw: unknown = JSON.parse(fs.readFileSync(modelsJsonPath(), "utf8"));
-			const providers = (raw as { providers?: Record<string, { api?: unknown }> }).providers;
-			const candidate = providers?.[providerId]?.api;
-			return typeof candidate === "string" ? candidate : undefined;
-		} catch {
-			return undefined;
-		}
-	};
-
 	pi.registerCommand("live-models-probe", {
 		description: "Probe thinking-effort behavior of one model; --apply writes the suggested overrides: /live-models-probe <provider> <model> [--apply]",
 		handler: async (args, ctx) => {
@@ -714,7 +716,7 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 				ctx.ui.notify(`${LOG} model "${modelId}" is not in ${providerId}'s list — run /live-models-test ${providerId} to see the ids.`);
 				return;
 			}
-			const api = resolveProbeApi(providerId, rt.entry);
+			const api = resolveProviderApi(providerId, rt.entry);
 			if (!api || !(PROBE_APIS as readonly string[]).includes(api)) {
 				ctx.ui.notify(`${LOG} cannot probe ${providerId}: api is ${api ? `"${api}" (unsupported)` : "not set"}.\nProbe supports: ${PROBE_APIS.join(", ")}. Set api on the live-models entry or the models.json provider.`);
 				return;
@@ -728,15 +730,13 @@ export default function liveModelsExtension(pi: ExtensionAPI): void {
 			const url = chatEndpointUrl(rt.entry.baseUrl, probeApi);
 			const shots = planProbeShots(probeApi);
 			const requestCount = shots.reduce((n, s) => n + (s.confirm ? 2 : 1), 0);
-			ctx.ui.notify(`${LOG} probing ${providerId}/${modelId} via ${probeApi} — ${requestCount} tiny requests to ${url}${apply ? " (--apply)" : ""} ...`);
-			const headers: Record<string, string> = { ...(rt.entry.headers ?? {}), "content-type": "application/json" };
-			if (probeApi === "anthropic-messages") {
-				headers["x-api-key"] = key;
-				headers["anthropic-version"] = "2023-06-01";
-				if (rt.entry.authHeader) headers.Authorization = `Bearer ${key}`;
-			} else {
-				headers.Authorization = `Bearer ${key}`;
-			}
+			ctx.ui.notify(`${LOG} probing ${providerId}/${modelId} via ${probeApi} — ${requestCount} tiny requests to ${redactUrl(url)}${apply ? " (--apply)" : ""} ...`);
+			// Header specs resolve per request; auth mirrors the provider's chat
+			// api family (x-api-key for anthropic, Bearer otherwise).
+			const { headers, dropped } = buildFetchHeaders(rt.entry, key, probeApi);
+			for (const note of dropped) console.warn(`${LOG} ${providerId}: ${note}`);
+			// guard against a case-variant entry header (fetch would send both)
+			if (!Object.keys(headers).some((k) => k.toLowerCase() === "content-type")) headers["content-type"] = "application/json";
 			const timeoutMs = Math.max(rt.entry.timeoutMs ?? DEFAULT_TIMEOUT_MS, 30_000);
 			const outcomes: ProbeOutcome[] = [];
 			for (const shot of shots) {

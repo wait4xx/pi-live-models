@@ -358,3 +358,85 @@ test("providerRegistrationConfig forwards every provider-level field pi composes
 	const minimal = providerRegistrationConfig({ baseUrl: "https://b.example" });
 	assert.deepEqual(minimal, { baseUrl: "https://b.example" });
 });
+
+test("baseUrl/modelsUrl env specs resolve at config load", () => {
+	process.env.PLM_T_BASE = "https://gw.example";
+	try {
+		const { config, issues, skipped } = parseConfig({
+			providers: {
+				a: { baseUrl: "${PLM_T_BASE}/v1", modelsUrl: "$PLM_T_BASE/custom/models?key=${PLM_T_BASE}" },
+			},
+		});
+		assert.deepEqual(skipped, []);
+		assert.deepEqual(issues, []);
+		assert.equal(config.providers.a?.baseUrl, "https://gw.example/v1");
+		assert.equal(config.providers.a?.modelsUrl, "https://gw.example/custom/models?key=https://gw.example");
+	} finally {
+		delete process.env.PLM_T_BASE;
+	}
+});
+
+test("baseUrl env spec: unset variable skips the entry naming the variable", () => {
+	const { config, issues, skipped } = parseConfig({ providers: { a: { baseUrl: "https://${PLM_T_UNSET_XYZ}/v1" } } });
+	assert.deepEqual(skipped, ["a"]);
+	assert.equal(config.providers.a, undefined);
+	assert.ok(issues.some((i) => i.field === "baseUrl" && i.message.includes("PLM_T_UNSET_XYZ") && i.message.includes("entry skipped")));
+});
+
+test("inherited baseUrl env spec resolves like an explicit one", () => {
+	process.env.PLM_T_INHERIT = "https://static.example";
+	try {
+		const ok = parseConfig({ providers: { A: {} } }, { staticProviders: { A: { baseUrl: "${PLM_T_INHERIT}/v2" } } });
+		assert.deepEqual(ok.skipped, []);
+		assert.equal(ok.config.providers.A?.baseUrl, "https://static.example/v2");
+
+		const unset = parseConfig({ providers: { A: {} } }, { staticProviders: { A: { baseUrl: "$PLM_T_UNSET_XYZ/v2" } } });
+		assert.deepEqual(unset.skipped, ["A"]);
+		assert.ok(unset.issues.some((i) => i.field === "baseUrl" && i.message.includes("inherited") && i.message.includes("PLM_T_UNSET_XYZ")));
+	} finally {
+		delete process.env.PLM_T_INHERIT;
+	}
+});
+
+test("modelsUrl env spec: unset variable ignores the field, entry survives", () => {
+	const { config, issues, skipped } = parseConfig({
+		providers: { a: { baseUrl: "https://x.example/v1", modelsUrl: "https://x.example/m?key=${PLM_T_UNSET_XYZ}" } },
+	});
+	assert.deepEqual(skipped, []);
+	assert.equal(config.providers.a?.modelsUrl, undefined);
+	assert.ok(issues.some((i) => i.field === "modelsUrl" && i.message.includes("PLM_T_UNSET_XYZ") && i.message.includes("falls back")));
+});
+
+test("baseUrl $$ escapes stay literal; raw $ in a URL is an env reference (pi semantics)", () => {
+	const { config, skipped } = parseConfig({ providers: { a: { baseUrl: "https://x.example/$$vault/v1" } } });
+	assert.deepEqual(skipped, []);
+	assert.equal(config.providers.a?.baseUrl, "https://x.example/$vault/v1");
+
+	// $path is a valid env name -> treated as a reference; unset -> skipped
+	const stray = parseConfig({ providers: { a: { baseUrl: "https://x.example/$path/v1" } } });
+	assert.deepEqual(stray.skipped, ["a"]);
+	assert.ok(stray.issues.some((i) => i.field === "baseUrl" && i.message.includes("path")));
+});
+
+test("header specs pass through raw for pi to resolve at chat time", () => {
+	const { config, issues, skipped } = parseConfig({
+		providers: { a: { baseUrl: "https://x.example", headers: { "x-goog-api-key": "${PLM_T_UNSET_XYZ}", "x-literal": "plain" } } },
+	});
+	assert.deepEqual(skipped, []);
+	assert.deepEqual(issues, []);
+	assert.deepEqual(config.providers.a?.headers, { "x-goog-api-key": "${PLM_T_UNSET_XYZ}", "x-literal": "plain" });
+});
+
+test("!command baseUrl spec round-trips through parseConfig", () => {
+	const { config, issues, skipped } = parseConfig({ providers: { a: { baseUrl: "!echo https://cmd.example/v1" } } });
+	assert.deepEqual(skipped, []);
+	assert.deepEqual(issues, []);
+	assert.equal(config.providers.a?.baseUrl, "https://cmd.example/v1");
+});
+
+test("modelsUrl resolving to a non-http(s) value is ignored, entry survives", () => {
+	const { config, issues, skipped } = parseConfig({ providers: { a: { baseUrl: "https://x.example/v1", modelsUrl: "ftp://mirror.example/models" } } });
+	assert.deepEqual(skipped, []);
+	assert.equal(config.providers.a?.modelsUrl, undefined);
+	assert.ok(issues.some((i) => i.field === "modelsUrl" && i.message.includes("http(s)")));
+});

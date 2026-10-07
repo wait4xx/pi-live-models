@@ -3,7 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildCatalog, buildModelsUrl, buildModel, collectStaticById, envKeyVarName, hoistProviderFields, liveCostFrom, liveNumber, resolveKeySpec } from "../extensions/discover.ts";
+import { buildCatalog, buildFetchHeaders, buildModelsUrl, buildModel, collectStaticById, envKeyVarName, hoistProviderFields, liveCostFrom, liveNumber, redactUrl, resolveKeySpec } from "../extensions/discover.ts";
+import { missingEnvNames, resolveConfigValue } from "../extensions/config.ts";
 import { compileFilters } from "../extensions/filters.ts";
 import type { ProviderEntry } from "../extensions/config.ts";
 
@@ -314,4 +315,124 @@ test("collectStaticById hoists provider fields into both static sources, models.
 		process.env.PI_CODING_AGENT_DIR = previousDir;
 		fs.rmSync(tmp, { recursive: true, force: true });
 	}
+});
+
+test("resolveConfigValue: pi template semantics — inline refs, escapes, literals", () => {
+	process.env.PLM_T_A = "alpha";
+	process.env.PLM_T_B = "beta";
+	try {
+		assert.equal(resolveConfigValue("x-${PLM_T_A}-y"), "x-alpha-y");
+		assert.equal(resolveConfigValue("$PLM_T_A$PLM_T_B"), "alphabeta");
+		assert.equal(resolveConfigValue("$PLM_T_A-tail"), "alpha-tail"); // inline, not whole-string only
+		assert.equal(resolveConfigValue("a$$b"), "a$b");
+		assert.equal(resolveConfigValue("a$!b"), "a!b");
+		assert.equal(resolveConfigValue("${1bad}"), "${1bad}"); // non-name brace content stays literal
+		assert.equal(resolveConfigValue("cost$"), "cost$"); // trailing stray $
+		assert.equal(resolveConfigValue("plain-literal"), "plain-literal");
+		assert.equal(resolveConfigValue(""), "");
+		// missing / empty env: whole value undefined, never an empty interpolation
+		assert.equal(resolveConfigValue("${PLM_T_UNSET_XYZ}/v1"), undefined);
+		assert.equal(resolveConfigValue("!echo plm-cmd"), "plm-cmd");
+		assert.equal(resolveConfigValue("!false"), undefined); // non-zero exit
+		assert.equal(resolveConfigValue("!echo -n"), undefined); // empty stdout
+	} finally {
+		delete process.env.PLM_T_A;
+		delete process.env.PLM_T_B;
+	}
+});
+
+test("missingEnvNames lists unset references only", () => {
+	process.env.PLM_T_SET_ONE = "1";
+	try {
+		assert.deepEqual(missingEnvNames("${PLM_T_UNSET_XYZ}/${PLM_T_UNSET_ZZZ}"), ["PLM_T_UNSET_XYZ", "PLM_T_UNSET_ZZZ"]);
+		assert.deepEqual(missingEnvNames("$PLM_T_SET_ONE/plain"), []);
+		assert.deepEqual(missingEnvNames("no-refs-at-all"), []);
+		assert.deepEqual(missingEnvNames("!some command $NOT_A_REF"), []); // command specs reference nothing
+	} finally {
+		delete process.env.PLM_T_SET_ONE;
+	}
+});
+
+test("resolveKeySpec now expands inline references like pi's chat path", () => {
+	process.env.PLM_T_A = "alpha";
+	try {
+		assert.equal(resolveKeySpec("sk-$PLM_T_A-tail"), "sk-alpha-tail");
+		assert.equal(resolveKeySpec("$PLM_T_A"), "alpha");
+		assert.equal(resolveKeySpec("literal-with-$$-dollar"), "literal-with-$-dollar");
+	} finally {
+		delete process.env.PLM_T_A;
+	}
+});
+
+test("buildFetchHeaders mirrors chat auth per api family", () => {
+	process.env.PLM_T_GOOG = "gk-1";
+	try {
+		// openai-family default: synthesized Bearer
+		assert.deepEqual(buildFetchHeaders({}, "k1", undefined).headers, { Authorization: "Bearer k1" });
+		assert.deepEqual(buildFetchHeaders({}, "k1", "openai-completions").headers, { Authorization: "Bearer k1" });
+		// google-style: custom header resolved, authHeader:false suppresses the synthesized Authorization
+		const google = buildFetchHeaders({ headers: { "x-goog-api-key": "${PLM_T_GOOG}" }, authHeader: false }, undefined, "openai-completions");
+		assert.deepEqual(google.headers, { "x-goog-api-key": "gk-1" });
+		assert.deepEqual(google.dropped, []);
+		// anthropic: x-api-key + version, Authorization only when authHeader is set
+		assert.deepEqual(buildFetchHeaders({}, "k1", "anthropic-messages").headers, { "x-api-key": "k1", "anthropic-version": "2023-06-01" });
+		assert.deepEqual(buildFetchHeaders({ authHeader: true }, "k1", "anthropic-messages").headers, {
+			"x-api-key": "k1",
+			"anthropic-version": "2023-06-01",
+			Authorization: "Bearer k1",
+		});
+		// an explicit Authorization header always wins over the synthesized one
+		assert.deepEqual(buildFetchHeaders({ headers: { Authorization: "Custom tok" } }, "k1", undefined).headers, { Authorization: "Custom tok" });
+		// an anthropic entry header wins over the synthesized x-api-key
+		assert.deepEqual(buildFetchHeaders({ headers: { "X-Api-Key": "own" } }, "k1", "anthropic-messages").headers, { "X-Api-Key": "own", "anthropic-version": "2023-06-01" });
+		// unset env drops that header with a note, never an empty value
+		const dropped = buildFetchHeaders({ headers: { "x-key": "${PLM_T_UNSET_XYZ}", "x-ok": "plain" } }, undefined, undefined);
+		assert.deepEqual(dropped.headers, { "x-ok": "plain" });
+		assert.equal(dropped.dropped.length, 1);
+		assert.ok(dropped.dropped[0].includes("x-key"));
+		// no key at all: only entry headers (resolved) are sent
+		assert.deepEqual(buildFetchHeaders({ headers: { "x-a": "1" } }, undefined, undefined).headers, { "x-a": "1" });
+	} finally {
+		delete process.env.PLM_T_GOOG;
+	}
+});
+
+test("redactUrl masks query values, userinfo, and fragments for display", () => {
+	assert.equal(redactUrl("https://x.example/v1/models?key=sk-secret&v=2"), "https://x.example/v1/models?key=...&v=...");
+	assert.equal(redactUrl("https://user:pass@x.example/v1/models"), "https://...@x.example/v1/models");
+	assert.equal(redactUrl("https://x.example/v1/models#tok"), "https://x.example/v1/models#...");
+	assert.equal(redactUrl("https://x.example/v1/models"), "https://x.example/v1/models");
+	assert.equal(redactUrl("not a url"), "not a url");
+});
+
+test("resolveConfigValue: empty-string env var counts as unset (pi convention)", () => {
+	process.env.PLM_T_EMPTY = "";
+	try {
+		assert.equal(resolveConfigValue("x-${PLM_T_EMPTY}-y"), undefined);
+		assert.deepEqual(missingEnvNames("${PLM_T_EMPTY}"), ["PLM_T_EMPTY"]);
+	} finally {
+		delete process.env.PLM_T_EMPTY;
+	}
+});
+
+test("resolveConfigValue: unterminated ${ and $digit stay literal (pi mirror)", () => {
+	assert.equal(resolveConfigValue("a-${UNCLOSED"), "a-${UNCLOSED");
+	assert.equal(resolveConfigValue("$1abc"), "$1abc");
+	assert.equal(resolveConfigValue("$$1abc"), "$1abc");
+});
+
+test("buildFetchHeaders: authHeader true forces Bearer over a user-set Authorization (pi withConfiguredAuth)", () => {
+	assert.deepEqual(buildFetchHeaders({ headers: { Authorization: "Custom tok" }, authHeader: true }, "k1", "openai-completions").headers, { Authorization: "Bearer k1" });
+	assert.deepEqual(buildFetchHeaders({ headers: { authorization: "Custom tok" }, authHeader: true }, "k1", "anthropic-messages").headers, {
+		"x-api-key": "k1",
+		"anthropic-version": "2023-06-01",
+		authorization: "Custom tok",
+		Authorization: "Bearer k1",
+	});
+});
+
+test("buildFetchHeaders: empty-string literal header value is dropped like pi", () => {
+	const result = buildFetchHeaders({ headers: { "x-empty": "", "x-ok": "v" } }, undefined, undefined);
+	assert.deepEqual(result.headers, { "x-ok": "v" });
+	assert.equal(result.dropped.length, 1);
 });

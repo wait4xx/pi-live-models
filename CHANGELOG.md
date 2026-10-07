@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-Behavior probing: measure what the gateway actually executes.
+Behavior probing: measure what the gateway actually executes. Credential specs everywhere + honest discovery auth.
 
 ### Added
 
@@ -14,6 +14,13 @@ Behavior probing: measure what the gateway actually executes.
   - openai-completions gateways whose thinking wire format pi would auto-detect as non-OpenAI (deepseek/zai/together/ant-ling/openrouter hosts, or a configured `compat.thinkingFormat`) get an evidence-only report — the probe measures bare `reasoning_effort`, which is not the shape pi sends there, so nothing is written.
   
   Dry-run by default (evidence table + suggested `overrides` entry); `--apply` writes `thinkingLevelMap` (wholesale), `compat` (merged per key), and `reasoning` (never `false`) into `overrides` in `live-models.json` via the same atomic preserve-write as `/live-models-fix`. Credentials reuse the discovery ladder minus the `/login` context credential (commands do not receive it); probes respect `entry.headers`/`authHeader`; model ids are validated against the last live list ∪ persisted cache.
+- **Env/command specs everywhere** — `baseUrl`, `modelsUrl`, and `headers` values now accept the same config-value specs `apiKey` always had: inline `$VAR`/`${VAR}` interpolation, `$$`/`$!` literal escapes, or a leading `!command`, resolved with pi core's exact template semantics so discovery authenticates exactly like the chat path (previously a literal `${GEMINI_API_KEY}` was sent verbatim in headers, and baseUrl could not reference env at all). Unset variables never interpolate as empty strings: an unresolvable `baseUrl` (explicit or inherited) skips the entry with a warning naming the variable, an unresolvable `modelsUrl` is ignored (discovery falls back to the derived URL), and an unresolvable header is dropped per request with a warning. `headers` specs are passed through raw to pi's provider registration — pi already resolves them per chat request, so expanding them earlier would double-resolve (a secret containing `$` or starting with `!` would be re-interpreted, even shell-executed). Resolved URLs that embed credentials (`?key=${SECRET}`) are redacted — query values, userinfo, and fragments masked in error messages, `/live-models` status output, and the on-disk cache.
+- **Discovery/probe auth now mirrors the chat api family** — `anthropic-messages` providers send `x-api-key` + `anthropic-version` instead of a stray `Authorization: Bearer` (which some anthropic-protocol gateways reject); an explicit `authHeader: false` suppresses the synthesized `Authorization` on discovery/probe fetches — the escape hatch for custom-header auth (e.g. Google's `x-goog-api-key`) where a stray `Authorization` causes credential-clash 401s. A header set explicitly in `entry.headers` now wins over the synthesized one (it previously got overwritten).
+
+### Changed
+
+- `apiKey` spec resolution gained inline interpolation (`sk-$PREFIX-tail` now expands `$PREFIX`), matching pi's chat-path resolution — previously only whole-string `$ENV`/`${ENV}`/`!command` forms were recognized, so discovery and chat could authenticate with different keys for the same config.
+- An empty-string `modelsUrl` is now ignored with a warning instead of producing a broken fetch URL.
 
 ## [0.3.4] - 2026-09-09
 
